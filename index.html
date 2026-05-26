@@ -1,0 +1,1664 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<title>COGS 160 – VR Lab</title>
+<script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+<script>
+// Desktop + Meta Quest locomotion. Moves the camera rig in both flat-screen and WebXR.
+AFRAME.registerComponent('dual-mode-locomotion', {
+  schema: {
+    speed: {default: 2.1},
+    turnSpeed: {default: 85},        // degrees / second, right Quest stick
+    deadzone: {default: 0.14},
+    desktopY: {default: 0},
+    vrY: {default: 0.95}             // raises Quest viewpoint; lower to .55 if too tall
+  },
+  init: function () {
+    this.keys = {};
+    this.moveStick = {x: 0, y: 0};
+    this.turnStick = {x: 0, y: 0};
+    this.camera = null;
+    this.tmpQuat = new THREE.Quaternion();
+    this.tmpEuler = new THREE.Euler(0, 0, 0, 'YXZ');
+    this._keyDown = e => { this.keys[e.code] = true; };
+    this._keyUp = e => { this.keys[e.code] = false; };
+    window.addEventListener('keydown', this._keyDown);
+    window.addEventListener('keyup', this._keyUp);
+
+    this.el.sceneEl.addEventListener('enter-vr', () => {
+      this.el.object3D.position.y = this.data.vrY;
+      if (window.logEvent) window.logEvent('VR_HEIGHT', `VR player height boost: ${this.data.vrY}m`);
+    });
+    this.el.sceneEl.addEventListener('exit-vr', () => {
+      this.el.object3D.position.y = this.data.desktopY;
+    });
+
+    const bindStick = () => {
+      ['leftHand','rightHand'].forEach(id => {
+        const hand = document.getElementById(id);
+        if (!hand || hand.dataset.locoBound) return;
+        hand.dataset.locoBound = 'true';
+        hand.addEventListener('thumbstickmoved', e => {
+          const x = e.detail.x || 0;
+          const y = e.detail.y || 0;
+          if (id === 'leftHand') this.moveStick = {x, y};
+          if (id === 'rightHand') this.turnStick = {x, y};
+        });
+        hand.addEventListener('thumbsticktouchend', () => {
+          if (id === 'leftHand') this.moveStick = {x:0,y:0};
+          if (id === 'rightHand') this.turnStick = {x:0,y:0};
+        });
+      });
+    };
+    this.el.sceneEl.addEventListener('loaded', bindStick);
+    setTimeout(bindStick, 500);
+  },
+  remove: function () {
+    window.removeEventListener('keydown', this._keyDown);
+    window.removeEventListener('keyup', this._keyUp);
+  },
+  getCameraWorldYaw: function () {
+    this.camera.object3D.getWorldQuaternion(this.tmpQuat);
+    this.tmpEuler.setFromQuaternion(this.tmpQuat, 'YXZ');
+    return this.tmpEuler.y;
+  },
+  tick: function (time, dt) {
+    if (!this.camera) this.camera = document.getElementById('cam');
+    if (!this.camera) return;
+    const sec = Math.min(dt / 1000, 0.05);
+
+    // Right Quest stick = smooth POV/body rotation. Head rotation still works normally.
+    if (Math.abs(this.turnStick.x) > this.data.deadzone) {
+      this.el.object3D.rotation.y -= THREE.MathUtils.degToRad(this.turnStick.x * this.data.turnSpeed * sec);
+    }
+
+    let x = 0, z = 0;
+    if (this.keys.KeyW || this.keys.ArrowUp) z -= 1;
+    if (this.keys.KeyS || this.keys.ArrowDown) z += 1;
+    if (this.keys.KeyA || this.keys.ArrowLeft) x -= 1;
+    if (this.keys.KeyD || this.keys.ArrowRight) x += 1;
+    if (Math.abs(this.moveStick.x) > this.data.deadzone) x += this.moveStick.x;
+    if (Math.abs(this.moveStick.y) > this.data.deadzone) z += this.moveStick.y;
+    const mag = Math.hypot(x, z);
+    if (!mag) return;
+    x /= mag; z /= mag;
+    const yaw = this.getCameraWorldYaw();
+    const sin = Math.sin(yaw), cos = Math.cos(yaw);
+    this.el.object3D.position.x += (x * cos - z * sin) * this.data.speed * sec;
+    this.el.object3D.position.z += (x * sin + z * cos) * this.data.speed * sec;
+  }
+});
+
+AFRAME.registerComponent('vr-chess-controller', {
+  init: function () {
+    const activate = () => {
+      const ray = this.el.components.raycaster;
+      const hit = ray && ray.intersections && ray.intersections[0];
+      if (hit && hit.object && hit.object.el) hit.object.el.emit('click', {cursorEl: this.el}, false);
+      else if (window.nearTable && typeof window.openChess === 'function') window.openChess();
+    };
+    this.el.addEventListener('triggerdown', activate);
+    this.el.addEventListener('abuttondown', activate);
+    this.el.addEventListener('xbuttondown', activate);
+    this.el.addEventListener('bbuttondown', () => { if (typeof window.closeChess === 'function') window.closeChess(); });
+    this.el.addEventListener('ybuttondown', () => { if (typeof window.closeChess === 'function') window.closeChess(); });
+  }
+});
+</script>
+<script src="/socket.io/socket.io.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Courier New',monospace;background:#000;overflow:hidden}
+
+/* ── HUD ── */
+#hud{position:fixed;top:12px;left:12px;z-index:999;background:rgba(6,4,2,.92);border:1px solid #5a4a2e;border-radius:8px;padding:12px 16px;width:230px;color:#d4c4a0}
+#hud h2{font-size:9px;letter-spacing:3px;text-transform:uppercase;color:#c9a96e;margin-bottom:6px}
+#cond-name{font-size:12px;font-weight:bold;color:#f0ddb0;margin-bottom:2px}
+#cond-desc{font-size:9px;color:#8a7a60;line-height:1.5;margin-bottom:6px}
+#tags{display:flex;flex-wrap:wrap;gap:3px;margin-bottom:6px}
+.tag{background:#2a1e0e;border:1px solid #5a4a2e;border-radius:3px;padding:1px 5px;font-size:8px;color:#c9a96e}
+#hint{font-size:8px;color:#5a4a3a;border-top:1px solid #2a1e0e;padding-top:6px;line-height:1.8}
+
+/* ── CONTROL PANELS ── */
+#panels{position:fixed;top:12px;right:12px;bottom:112px;z-index:999;display:flex;flex-direction:column;gap:8px;width:min(315px,calc(100vw - 24px));overflow-y:auto;overflow-x:hidden;padding-right:4px;transition:transform .25s ease,opacity .25s ease;scrollbar-width:thin;scrollbar-color:#5a4a2e rgba(6,4,2,.45)}
+#panels.closed{transform:translateX(calc(100% + 28px));opacity:.08;pointer-events:none}
+#panel-toggle{position:fixed;top:12px;right:338px;z-index:1003;font-family:'Courier New',monospace;font-size:10px;letter-spacing:1px;text-transform:uppercase;background:rgba(6,4,2,.96);color:#c9a96e;border:1px solid #c9a96e;border-radius:6px;padding:9px 10px;cursor:pointer;box-shadow:0 8px 18px rgba(0,0,0,.35);transition:right .25s ease}
+#panel-toggle.closed{right:12px}
+#panel-toggle:hover{background:#2a1e0e;color:#f0ddb0}
+.panel{background:rgba(6,4,2,.92);border:1px solid #5a4a2e;border-radius:6px;padding:10px 12px;width:100%}
+.panel h3{font-size:8px;letter-spacing:2px;text-transform:uppercase;color:#c9a96e;margin-bottom:8px}
+.panel-title-row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+.panel-title-row h3{margin-bottom:0}
+.mini-panel-btn{font-family:'Courier New',monospace;font-size:9px;line-height:1;border:1px solid #5a4a2e;background:#0a0703;color:#c9a96e;border-radius:4px;padding:5px 8px;cursor:pointer}
+.mini-panel-btn:hover{border-color:#c9a96e;color:#f0ddb0}
+@media(max-width:850px){#panels{width:min(300px,calc(100vw - 24px));bottom:96px}#panel-toggle{right:12px;top:8px}}
+.pbtn{font-family:'Courier New',monospace;font-size:9px;letter-spacing:1px;text-transform:uppercase;padding:7px 10px;border-radius:4px;cursor:pointer;border:1px solid #3a2e1e;background:transparent;color:#6a5a40;width:100%;text-align:left;margin-bottom:4px;transition:all .2s}
+.pbtn:hover{border-color:#c9a96e;color:#c9a96e}
+.pbtn.active{background:#2a1e0e;border-color:#c9a96e;color:#f0ddb0}
+.pbtn small{float:right;font-size:7px;color:#5a4a3a;margin-top:1px}
+
+/* ── CHESS OVERLAY ── */
+#chess-overlay{position:fixed;inset:0;z-index:1000;background:rgba(3,2,1,.97);display:none;flex-direction:column;align-items:center;justify-content:center;gap:14px}
+#chess-overlay.open{display:flex}
+#chess-title{color:#c9a96e;font-size:12px;letter-spacing:3px;text-transform:uppercase}
+#chess-sub{font-size:9px;color:#6a5a40;letter-spacing:1px}
+#chess-status{color:#f0ddb0;font-size:11px;min-height:16px;text-align:center}
+#chess-board{border:4px solid #6a4a20;cursor:pointer;display:block}
+#chess-stats{display:flex;gap:20px;font-size:9px;color:#6a5a40}
+#chess-stats span{color:#c9a96e;font-size:12px;font-weight:bold;display:block}
+#chess-btns{display:flex;gap:8px;margin-top:4px}
+.cbtn2{font-family:'Courier New',monospace;font-size:9px;letter-spacing:1px;padding:8px 18px;border-radius:4px;cursor:pointer;border:1px solid #5a4a2e;background:#1a1208;color:#c9a96e;text-transform:uppercase}
+.cbtn2:hover{background:#2a1e0e;border-color:#c9a96e}
+#close-btn{font-family:'Courier New',monospace;font-size:8px;letter-spacing:1px;padding:6px 14px;border-radius:4px;cursor:pointer;border:1px solid #2a1e0e;background:transparent;color:#5a4a3a;text-transform:uppercase}
+#close-btn:hover{color:#c9a96e;border-color:#5a4a2e}
+
+/* ── APPROACH PROMPT ── */
+#prompt{position:fixed;bottom:70px;left:50%;transform:translateX(-50%);z-index:999;background:rgba(6,4,2,.92);border:1px solid #c9a96e;border-radius:6px;padding:9px 20px;color:#c9a96e;font-size:10px;letter-spacing:1px;display:none;pointer-events:none}
+#play-btn{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:999;font-family:'Courier New',monospace;font-size:10px;letter-spacing:2px;padding:11px 26px;border-radius:5px;cursor:pointer;border:1px solid #c9a96e;background:#1a1208;color:#f0ddb0;text-transform:uppercase;display:none}
+
+/* ── EVENT LOG: moved LEFT + collapsible so it never blocks right controls ── */
+#log{position:fixed;left:12px;top:276px;right:auto;bottom:auto;z-index:1002;background:rgba(3,6,3,.92);border:1px solid #1e3a1e;border-radius:8px;padding:0;width:310px;max-height:44vh;font-size:9px;color:#4caf50;box-shadow:0 12px 30px rgba(0,0,0,.45);overflow:hidden}
+#log-header{display:flex;align-items:center;justify-content:space-between;padding:9px 10px;border-bottom:1px solid #1e3a1e;background:rgba(4,10,4,.96)}
+#log h3{font-size:8px;color:#66bb6a;letter-spacing:2px;margin:0;text-transform:uppercase}
+.log-actions{display:flex;gap:5px}
+.log-btn{font-family:'Courier New',monospace;font-size:8px;line-height:1;border:1px solid #315831;background:#081208;color:#66bb6a;border-radius:4px;padding:5px 7px;cursor:pointer}
+.log-btn:hover{border-color:#66bb6a;color:#a5ffa5}
+#log-entries{padding:8px 10px;max-height:calc(44vh - 42px);overflow-y:auto}
+#log.collapsed{width:190px;max-height:38px}
+#log.collapsed #log-entries{display:none}
+#log.collapsed #log-min-btn{color:#f0ddb0;border-color:#c9a96e}
+.le{margin:0 0 6px 0;color:#66bb6a;line-height:1.35}.le span{color:#2e7d32}.le b{color:#f0ddb0;font-weight:normal}
+@media (max-height:760px){#log{top:215px;max-height:36vh}#log-entries{max-height:calc(36vh - 42px)}}
+.room-input{width:100%;font-family:inherit;font-size:9px;background:#0a0703;color:#c9a96e;border:1px solid #3a2e1e;border-radius:4px;padding:6px;margin-bottom:5px}
+
+.param-panel{width:100%;max-height:none;overflow:visible}
+#param-controls-panel.collapsed #task2-body{display:none}
+.slider-row{margin:9px 0 11px 0;border-top:1px solid rgba(201,169,110,.15);padding-top:8px}
+.slider-label{display:flex;justify-content:space-between;gap:8px;font-size:8px;letter-spacing:1px;text-transform:uppercase;color:#c9a96e;margin-bottom:5px}
+.slider-label output{color:#f0ddb0;font-size:9px;text-transform:none;letter-spacing:0}
+.param-slider{width:100%;accent-color:#c9a96e}
+.swatches{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;margin-top:6px}
+.swatch{height:22px;border:1px solid #5a4a2e;border-radius:4px;cursor:pointer}
+.swatch.active{outline:2px solid #f0ddb0;outline-offset:1px}
+.param-select{width:100%;font-family:inherit;font-size:9px;background:#0a0703;color:#c9a96e;border:1px solid #3a2e1e;border-radius:4px;padding:6px}
+.factor-pill{display:inline-block;margin:2px 2px 0 0;padding:2px 5px;border:1px solid #3a5a3a;border-radius:999px;color:#66bb6a;font-size:7px;letter-spacing:.5px;text-transform:uppercase}
+
+#net-status{font-size:8px;color:#6a5a40;line-height:1.4;margin-top:3px}
+
+/* ── BOTTOM CHESS HUD ── */
+#bottom-chess-hud{position:fixed;left:50%;bottom:14px;transform:translateX(-50%);z-index:1001;display:flex;gap:10px;align-items:stretch;font-family:'Courier New',monospace;pointer-events:auto}
+.hud-card{min-width:145px;background:rgba(6,4,2,.92);border:1px solid #5a4a2e;border-radius:7px;padding:10px 14px;color:#c9a96e;box-shadow:0 10px 24px rgba(0,0,0,.42)}
+.hud-card.turn{min-width:210px;border-color:#2f7d3a;color:#66dd77}
+.hud-label{font-size:8px;letter-spacing:2px;text-transform:uppercase;color:#c9a96e;margin-bottom:5px}
+.hud-value{font-size:24px;color:#f0ddb0;text-align:center;line-height:1}
+.hud-sub{font-size:9px;color:#8a7a60;margin-top:6px}
+.hud-actions{display:flex;gap:8px;align-items:center}
+.hud-action-btn{font-family:'Courier New',monospace;font-size:9px;letter-spacing:1px;text-transform:uppercase;background:#1a1208;color:#c9a96e;border:1px solid #5a4a2e;border-radius:5px;padding:13px 18px;cursor:pointer}
+.hud-action-btn:hover{border-color:#c9a96e;color:#f0ddb0;background:#2a1e0e}
+@media(max-width:950px){#bottom-chess-hud{left:12px;right:12px;transform:none;overflow-x:auto}.hud-card{min-width:120px}.hud-card.turn{min-width:170px}}
+</style>
+</head>
+<body>
+
+<div id="hud">
+  <h2>🔬 COGS 160 · VR Lab</h2>
+  <div id="cond-name">High Ceiling · Warm Dim</div>
+  <div id="cond-desc">5.0 m · 2700K low · awe + creative baseline</div>
+  <div id="tags"><span class="tag">L36 Awe</span><span class="tag">L25 Coziness</span><span class="tag">L23 ↓Arousal</span></div>
+  <div id="hint">Desktop: WASD — Move · Mouse — Look<br>VR: Left stick — Move · Right stick — Turn · Head — Look · Trigger — Select<br>Walk to chess table → E / controller trigger</div>
+</div>
+
+<button id="panel-toggle" onclick="toggleRightPanel()">Hide Controls</button>
+<div id="panels">
+  <div class="panel">
+    <h3>Ceiling Height</h3>
+    <button class="pbtn" onclick="setCeiling('low')">Low<small>2.4 m</small></button>
+    <button class="pbtn" onclick="setCeiling('mid')">Mid<small>3.2 m</small></button>
+    <button class="pbtn active" onclick="setCeiling('high')">High<small>5.0 m</small></button>
+  </div>
+  <div class="panel">
+    <h3>Lighting</h3>
+    <button class="pbtn active" onclick="setLight('warm_dim')">Warm Dim<small>2700K·low</small></button>
+    <button class="pbtn" onclick="setLight('warm_bright')">Warm Bright<small>2700K·hi</small></button>
+    <button class="pbtn" onclick="setLight('cool_bright')">Cool Bright<small>6500K·hi</small></button>
+    <button class="pbtn" onclick="setLight('cool_dim')">Cool Dim<small>6500K·low</small></button>
+  </div>
+
+  <div class="panel">
+    <h3>Chess Mode</h3>
+    <button class="pbtn active" id="mode-ai" onclick="setGameMode('ai')">AI Opponent<small>standardized</small></button>
+    <button class="pbtn" id="mode-human" onclick="setGameMode('human')">2 Player<small>online</small></button>
+    <input id="room-code" class="room-input" value="cogs160-chess" title="Room code for multiplayer" />
+    <button class="pbtn" onclick="joinMultiplayerRoom()">Join Room<small>sync</small></button>
+    <div id="net-status">Offline/local until server is running.</div>
+  </div>
+  <div class="panel">
+    <h3>AI Difficulty</h3>
+    <button class="pbtn" id="ai-random" onclick="setAIDifficulty('random')">Random<small>baseline</small></button>
+    <button class="pbtn" id="ai-easy" onclick="setAIDifficulty('easy')">Easy<small>low</small></button>
+    <button class="pbtn active" id="ai-standard" onclick="setAIDifficulty('standard')">Standard<small>test</small></button>
+    <button class="pbtn" id="ai-hard" onclick="setAIDifficulty('hard')">Hard<small>high</small></button>
+  </div>
+
+  <div id="param-controls-panel" class="panel param-panel">
+    <div class="panel-title-row"><h3>Task 2 Parametric Controls</h3><button id="task2-min-btn" class="mini-panel-btn" onclick="toggleTask2Panel()">−</button></div>
+    <div id="task2-body">
+    <div class="factor-pill">Geometry</div><div class="factor-pill">Lighting</div><div class="factor-pill">Materials</div><div class="factor-pill">Color</div><div class="factor-pill">Biophilic</div><div class="factor-pill">Furniture</div><div class="factor-pill">Acoustics</div><div class="factor-pill">Curvature</div>
+
+    <div class="slider-row">
+      <label class="slider-label">Ceiling Height <output id="out-ceiling">5.0 m</output></label>
+      <input id="param-ceiling" class="param-slider" type="range" min="2" max="6" step="0.1" value="5" oninput="applyParamControls()">
+    </div>
+    <div class="slider-row">
+      <label class="slider-label">CCT <output id="out-cct">2700 K</output></label>
+      <input id="param-cct" class="param-slider" type="range" min="2700" max="6500" step="100" value="2700" oninput="applyParamControls()">
+    </div>
+    <div class="slider-row">
+      <label class="slider-label">Light Intensity <output id="out-intensity">0.40</output></label>
+      <input id="param-intensity" class="param-slider" type="range" min="0" max="1.6" step="0.05" value="0.4" oninput="applyParamControls()">
+    </div>
+    <div class="slider-row">
+      <label class="slider-label">Wall Roughness <output id="out-roughness">0.80</output></label>
+      <input id="param-roughness" class="param-slider" type="range" min="0" max="1" step="0.05" value="0.8" oninput="applyParamControls()">
+    </div>
+    <div class="slider-row">
+      <label class="slider-label">Wall Colour <output id="out-wallcolor">warm plaster</output></label>
+      <div class="swatches">
+        <button class="swatch active" id="sw-warm" style="background:#d4c4a8" onclick="setWallColor('#d4c4a8','warm plaster',this)"></button>
+        <button class="swatch" id="sw-cool" style="background:#b8c8d8" onclick="setWallColor('#b8c8d8','cool blue-gray',this)"></button>
+        <button class="swatch" id="sw-green" style="background:#b9c8a6" onclick="setWallColor('#b9c8a6','biophilic sage',this)"></button>
+        <button class="swatch" id="sw-neutral" style="background:#c8c0b4" onclick="setWallColor('#c8c0b4','neutral gray',this)"></button>
+      </div>
+    </div>
+    <div class="slider-row">
+      <label class="slider-label">Plant Count <output id="out-plants">3</output></label>
+      <input id="param-plants" class="param-slider" type="range" min="0" max="3" step="1" value="3" oninput="applyParamControls()">
+    </div>
+    <div class="slider-row">
+      <label class="slider-label">Furniture Visible <output id="out-furniture">on</output></label>
+      <input id="param-furniture" class="param-slider" type="range" min="0" max="1" step="1" value="1" oninput="applyParamControls()">
+    </div>
+    <div class="slider-row">
+      <label class="slider-label">Ambient Audio</label>
+      <select id="param-audio" class="param-select" onchange="applyParamControls()">
+        <option value="fireplace">fireplace</option><option value="rain">rain</option><option value="birds">birds</option><option value="off">off</option>
+      </select>
+    </div>
+    <div class="slider-row">
+      <label class="slider-label">Wall Bow <output id="out-wallbow">0.00 · square</output></label>
+      <input id="param-wallbow" class="param-slider" type="range" min="-1" max="1" step="0.05" value="0" oninput="applyParamControls()">
+    </div>
+    <div class="slider-row">
+      <label class="slider-label">Ceiling Dome <output id="out-ceilingdome">0.00 · flat</output></label>
+      <input id="param-ceilingdome" class="param-slider" type="range" min="-1" max="1" step="0.05" value="0" oninput="applyParamControls()">
+    </div>
+    <button class="pbtn" onclick="applyPreset('meyers_high')">Preset: Meyers-Levy High<small>creative</small></button>
+    <button class="pbtn" onclick="applyPreset('low_analytic')">Preset: Low Analytic<small>focused</small></button>
+    <button class="pbtn" onclick="applyPreset('curved_refuge')">Preset: Curved Refuge<small>curved shell</small></button>
+    <button class="pbtn" onclick="exportParamSpec()">Export JSON Spec<small>task 3</small></button>
+    </div>
+  </div>
+</div>
+
+<div id="prompt">♟ Press E to play chess</div>
+<button id="play-btn" onclick="openChess()">♟ Play Chess</button>
+
+<!-- ══ CHESS OVERLAY ══ -->
+<div id="chess-overlay">
+  <div id="chess-title">Chess · Cognitive Task</div>
+  <div id="chess-sub" id="chess-sub">Ceiling: <span id="ceil-label">High 5.0m</span> &nbsp;·&nbsp; Light: <span id="light-label">Warm Dim</span></div>
+  <div id="chess-status">White to move — click a piece to select</div>
+  <canvas id="chess-board" width="480" height="480"></canvas>
+  <div id="chess-stats">
+    <div><span id="s-moves">0</span>Player Turns</div>
+    <div><span id="s-caps">0</span>Captures</div>
+    <div><span id="s-time">0:00</span>Time</div>
+    <div><span id="s-ceil">High</span>Ceiling</div>
+    <div><span id="s-light">Warm Dim</span>Light</div>
+    <div><span id="s-mode">AI</span>Mode</div>
+    <div><span id="s-ai">Standard</span>AI</div>
+  </div>
+  <div id="chess-btns">
+    <button class="cbtn2" onclick="resetChess()">New Game</button>
+    <button class="cbtn2" onclick="exportLog()">Export Log</button>
+    <button id="close-btn" onclick="closeChess()">← Return to Room</button>
+  </div>
+</div>
+
+<div id="log">
+  <div id="log-header">
+    <h3>▶ Event Log</h3>
+    <div class="log-actions">
+      <button id="log-min-btn" class="log-btn" onclick="toggleLog()">−</button>
+      <button class="log-btn" onclick="clearLogUI()">clear</button>
+    </div>
+  </div>
+  <div id="log-entries"></div>
+</div>
+
+<div id="bottom-chess-hud">
+  <div class="hud-card turn"><div class="hud-label">▶ <span id="hud-turn-label">Your Turn</span></div><div class="hud-sub" id="hud-status-mini">Make your move</div></div>
+  <div class="hud-card"><div class="hud-label">Player Turns</div><div class="hud-value" id="hud-moves">0</div></div>
+  <div class="hud-card"><div class="hud-label">Captures</div><div class="hud-value" id="hud-captures">0</div></div>
+  <div class="hud-card"><div class="hud-label">Timer</div><div class="hud-value" id="hud-time">0:00</div></div>
+  <div class="hud-actions"><button class="hud-action-btn" onclick="resetChess()">New Game</button><button class="hud-action-btn" onclick="resetChess()">Reset Board</button><button class="hud-action-btn" onclick="exportLog()">Export Log</button></div>
+</div>
+
+<!-- ══════════════════════════════════════════════════
+     A-FRAME SCENE
+══════════════════════════════════════════════════ -->
+<a-scene id="scene"
+  background="color:#100a04"
+  fog="type:linear;color:#100a04;near:16;far:32"
+  renderer="antialias:true;colorManagement:true"
+  vr-mode-ui="enabled:true">
+
+  <!-- Desktop + VR player rig -->
+  <a-entity id="rig" position="0 0 6" dual-mode-locomotion="speed:2.1; turnSpeed:85; vrY:0.95">
+    <a-entity id="cam" camera="fov:80;near:0.05" position="0 1.65 0"
+      look-controls="pointerLockEnabled:true"
+      cursor="rayOrigin: mouse; fuse: false"
+      raycaster="objects: .chess-interactive; far: 12">
+    </a-entity>
+
+    <!-- Meta Quest / WebXR controllers. Right trigger selects chess pieces/squares; left stick moves. -->
+    <a-entity id="leftHand"
+      laser-controls="hand: left"
+      raycaster="objects: .chess-interactive; far: 12; showLine: true; lineColor: #66bb6a"
+      cursor="rayOrigin: entity; fuse: false"
+      vr-chess-controller>
+    </a-entity>
+    <a-entity id="rightHand"
+      laser-controls="hand: right"
+      raycaster="objects: .chess-interactive; far: 12; showLine: true; lineColor: #c9a96e"
+      cursor="rayOrigin: entity; fuse: false"
+      vr-chess-controller>
+    </a-entity>
+  </a-entity>
+
+  <!-- FLOOR -->
+  <a-plane position="0 0 -3" rotation="-90 0 0" width="14" height="22" color="#5c3d1e" roughness="0.9"></a-plane>
+  <a-plane position="-5 .002 -3" rotation="-90 0 0" width=".04" height="22" color="#3a2510" opacity=".5"></a-plane>
+  <a-plane position="-3 .002 -3" rotation="-90 0 0" width=".04" height="22" color="#3a2510" opacity=".5"></a-plane>
+  <a-plane position="-1 .002 -3" rotation="-90 0 0" width=".04" height="22" color="#3a2510" opacity=".5"></a-plane>
+  <a-plane position=" 1 .002 -3" rotation="-90 0 0" width=".04" height="22" color="#3a2510" opacity=".5"></a-plane>
+  <a-plane position=" 3 .002 -3" rotation="-90 0 0" width=".04" height="22" color="#3a2510" opacity=".5"></a-plane>
+  <a-plane position=" 5 .002 -3" rotation="-90 0 0" width=".04" height="22" color="#3a2510" opacity=".5"></a-plane>
+
+  <!-- CEILING + BEAMS (JS controlled) -->
+  <a-plane id="ceiling" position="0 5 -3" rotation="90 0 0" width="14" height="22" color="#ede0cc"></a-plane>
+  <a-box id="bm1" position="-4 4.88 -3" width=".3" height=".25" depth="22" color="#7a5530"></a-box>
+  <a-box id="bm2" position=" 0 4.88 -3" width=".3" height=".25" depth="22" color="#7a5530"></a-box>
+  <a-box id="bm3" position=" 4 4.88 -3" width=".3" height=".25" depth="22" color="#7a5530"></a-box>
+  <a-box id="cb1" position="0 4.88  2" width="14" height=".25" depth=".3" color="#7a5530"></a-box>
+  <a-box id="cb2" position="0 4.88 -4" width="14" height=".25" depth=".3" color="#7a5530"></a-box>
+  <a-box id="cb3" position="0 4.88 -10" width="14" height=".25" depth=".3" color="#7a5530"></a-box>
+
+  <!-- WALLS -->
+  <a-box id="wback"  position="0 2.5 -12" width="14" height="5" depth=".2" color="#d4c4a8"></a-box>
+  <a-box id="wfront" position="0 2.5   7" width="14" height="5" depth=".2" color="#d4c4a8"></a-box>
+  <a-box id="wleft"  position="-7 2.5 -3" width=".2" height="5" depth="22" color="#c8b898"></a-box>
+  <a-box id="wright" position=" 7 2.5 -3" width=".2" height="5" depth="22" color="#c8b898"></a-box>
+  <!-- Parametric curved shell: generated by JS when curvature/vault sliders are nonzero -->
+  <a-entity id="curved-room-shell" data-role="curved-shell" visible="false"></a-entity>
+  <!-- wainscoting -->
+  <a-box position="0 .6 -11.89" width="13.5" height="1.2" depth=".05" color="#c0a870"></a-box>
+  <a-box position="-6.89 .6 -3" width=".05" height="1.2" depth="21" color="#c0a870"></a-box>
+  <a-box position=" 6.89 .6 -3" width=".05" height="1.2" depth="21" color="#c0a870"></a-box>
+  <!-- chair rail -->
+  <a-box position="0 1.25 -11.89" width="13.5" height=".08" depth=".06" color="#a08040"></a-box>
+  <a-box position="-6.89 1.25 -3" width=".06" height=".08" depth="21" color="#a08040"></a-box>
+  <a-box position=" 6.89 1.25 -3" width=".06" height=".08" depth="21" color="#a08040"></a-box>
+  <!-- crown (JS moves these) -->
+  <a-box id="cr-back"  position="0 4.85 -11.89" width="13.5" height=".2" depth=".15" color="#a08040"></a-box>
+  <a-box id="cr-left"  position="-6.89 4.85 -3" width=".15" height=".2" depth="21" color="#a08040"></a-box>
+  <a-box id="cr-right" position=" 6.89 4.85 -3" width=".15" height=".2" depth="21" color="#a08040"></a-box>
+  <!-- baseboard -->
+  <a-box position="0 .07 -11.89" width="13.5" height=".14" depth=".1" color="#a08040"></a-box>
+  <a-box position="-6.89 .07 -3" width=".1" height=".14" depth="21" color="#a08040"></a-box>
+  <a-box position=" 6.89 .07 -3" width=".1" height=".14" depth="21" color="#a08040"></a-box>
+
+  <!-- WINDOWS left wall -->
+  <a-box position="-6.88 2.6  1" width=".12" height="2.8" depth="3.2" color="#e8dcc8"></a-box>
+  <a-plane position="-6.74 2.6 1" rotation="0 90 0" width="3" height="2.6" color="#b8d8f0" opacity=".32" transparent="true"></a-plane>
+  <a-box position="-6.88 2.6 -6" width=".12" height="2.8" depth="3.2" color="#e8dcc8"></a-box>
+  <a-plane position="-6.74 2.6 -6" rotation="0 90 0" width="3" height="2.6" color="#b8d8f0" opacity=".32" transparent="true"></a-plane>
+  <!-- light shafts -->
+  <a-plane position="-4.5 1.8  1" rotation="0 72 -12" width="2.5" height="5" color="#fff8e0" opacity=".05" transparent="true"></a-plane>
+  <a-plane position="-4.5 1.8 -6" rotation="0 72 -12" width="2.5" height="5" color="#fff8e0" opacity=".05" transparent="true"></a-plane>
+
+  <!-- FIREPLACE -->
+  <a-entity position="-6.5 0 -9">
+    <a-box position=".12 1.5  .15" width=".26" height="3" depth="2.6" color="#8a7050"></a-box>
+    <a-box position=".12 3.1 -1.1" width=".26" height=".4" depth="2.6" color="#8a7050"></a-box>
+    <a-box position=".12 1.2 -1.1" width=".22" height="2" depth="2.2" color="#1a0d00"></a-box>
+    <a-box position=".12 3.45 -1.1" width=".32" height=".14" depth="2.9" color="#6a5030"></a-box>
+    <a-plane position=".2 .7 -1.1" rotation="0 90 0" width="1.8" height="1.4" color="#ff6600" opacity=".82" transparent="true"
+      animation="property:opacity;from:.6;to:.96;dur:600;dir:alternate;loop:true;easing:easeInOutSine"></a-plane>
+    <a-plane position=".21 .88 -1.1" rotation="0 90 0" width="1" height=".9" color="#ffcc00" opacity=".62" transparent="true"
+      animation="property:opacity;from:.4;to:.82;dur:450;dir:alternate;loop:true;easing:easeInOutSine"></a-plane>
+    <a-box position=".12 .04 -1.1" width=".22" height=".08" depth="2.2" color="#6a5840"></a-box>
+  </a-entity>
+
+  <!-- BOOKSHELVES right wall -->
+  <a-entity position="6.72 0 -5">
+    <a-box position="0 2.5 0" width=".24" height="5" depth="7" color="#4a3218"></a-box>
+    <a-box position="-.1 .55 0" width=".14" height=".07" depth="6.8" color="#5a3e20"></a-box>
+    <a-box position="-.1 1.2 0" width=".14" height=".07" depth="6.8" color="#5a3e20"></a-box>
+    <a-box position="-.1 1.85 0" width=".14" height=".07" depth="6.8" color="#5a3e20"></a-box>
+    <a-box position="-.1 2.5 0" width=".14" height=".07" depth="6.8" color="#5a3e20"></a-box>
+    <a-box position="-.1 3.15 0" width=".14" height=".07" depth="6.8" color="#5a3e20"></a-box>
+    <a-box position="-.1 3.8 0" width=".14" height=".07" depth="6.8" color="#5a3e20"></a-box>
+    <!-- books row 1 -->
+    <a-box position="-.11 .9 -2.8" width=".1" height=".58" depth=".16" color="#8b2020"></a-box>
+    <a-box position="-.11 .9 -2.4" width=".1" height=".54" depth=".14" color="#204080"></a-box>
+    <a-box position="-.11 .9 -2.0" width=".1" height=".60" depth=".15" color="#206040"></a-box>
+    <a-box position="-.11 .9 -1.5" width=".1" height=".52" depth=".14" color="#806020"></a-box>
+    <a-box position="-.11 .9 -1.0" width=".1" height=".58" depth=".13" color="#602080"></a-box>
+    <a-box position="-.11 .9 -.5" width=".1" height=".56" depth=".15" color="#c06020"></a-box>
+    <a-box position="-.11 .9  .0" width=".1" height=".60" depth=".14" color="#204060"></a-box>
+    <a-box position="-.11 .9  .5" width=".1" height=".54" depth=".13" color="#602020"></a-box>
+    <a-box position="-.11 .9 1.0" width=".1" height=".58" depth=".15" color="#40a060"></a-box>
+    <a-box position="-.11 .9 1.5" width=".1" height=".56" depth=".14" color="#a04020"></a-box>
+    <a-box position="-.11 .9 2.0" width=".1" height=".60" depth=".15" color="#2060a0"></a-box>
+    <a-box position="-.11 .9 2.5" width=".1" height=".52" depth=".13" color="#806040"></a-box>
+    <!-- books row 2 -->
+    <a-box position="-.11 1.55 -2.5" width=".1" height=".56" depth=".15" color="#a02060"></a-box>
+    <a-box position="-.11 1.55 -2.0" width=".1" height=".60" depth=".14" color="#208040"></a-box>
+    <a-box position="-.11 1.55 -1.5" width=".1" height=".54" depth=".13" color="#604020"></a-box>
+    <a-box position="-.11 1.55 -1.0" width=".1" height=".58" depth=".15" color="#203060"></a-box>
+    <a-box position="-.11 1.55 -.5" width=".1" height=".56" depth=".14" color="#802020"></a-box>
+    <a-box position="-.11 1.55  .0" width=".1" height=".60" depth=".15" color="#208060"></a-box>
+    <a-box position="-.11 1.55  .5" width=".1" height=".52" depth=".13" color="#406020"></a-box>
+    <a-box position="-.11 1.55 1.0" width=".1" height=".58" depth=".14" color="#204080"></a-box>
+    <a-box position="-.11 1.55 1.6" width=".1" height=".56" depth=".15" color="#a06040"></a-box>
+    <a-box position="-.11 1.55 2.2" width=".1" height=".60" depth=".13" color="#602040"></a-box>
+  </a-entity>
+
+  <!-- CHESS TABLE -->
+  <a-box position="0 .78 -1" width="1.5" height=".08" depth="1.5" color="#3a2810"></a-box>
+  <!-- 3D interactive checkerboard is generated by JavaScript inside #table-chess-set -->
+  <a-entity id="table-chess-set" position="0 .895 -1" rotation="0 0 0"></a-entity>
+  <!-- Table legs -->
+  <a-cylinder position="-.65 .39 -.35" radius=".05" height=".78" color="#2a1e0c"></a-cylinder>
+  <a-cylinder position=" .65 .39 -.35" radius=".05" height=".78" color="#2a1e0c"></a-cylinder>
+  <a-cylinder position="-.65 .39 -1.65" radius=".05" height=".78" color="#2a1e0c"></a-cylinder>
+  <a-cylinder position=" .65 .39 -1.65" radius=".05" height=".78" color="#2a1e0c"></a-cylinder>
+  <!-- apron -->
+  <a-box position="0 .72 -.32" width="1.4" height=".08" depth=".05" color="#2a1e0c"></a-box>
+  <a-box position="0 .72 -1.68" width="1.4" height=".08" depth=".05" color="#2a1e0c"></a-box>
+  <a-box position="-.72 .72 -1" width=".05" height=".08" depth="1.4" color="#2a1e0c"></a-box>
+  <a-box position=" .72 .72 -1" width=".05" height=".08" depth="1.4" color="#2a1e0c"></a-box>
+  <!-- CHAIRS — south faces north (backrest at +z), north faces south (backrest at -z) -->
+  <a-entity data-role="furniture" position="0 0 .75">
+    <a-box position="0 .48 0" width=".7" height=".1" depth=".7" color="#5a3020"></a-box>
+    <a-box position="0 .95 .33" width=".7" height=".85" depth=".1" color="#5a3020"></a-box>
+    <a-cylinder position="-.3 .22 -.3" radius=".04" height=".44" color="#3a1e0e"></a-cylinder>
+    <a-cylinder position=" .3 .22 -.3" radius=".04" height=".44" color="#3a1e0e"></a-cylinder>
+    <a-cylinder position="-.3 .22  .3" radius=".04" height=".44" color="#3a1e0e"></a-cylinder>
+    <a-cylinder position=" .3 .22  .3" radius=".04" height=".44" color="#3a1e0e"></a-cylinder>
+  </a-entity>
+  <a-entity data-role="furniture" position="0 0 -2.75">
+    <a-box position="0 .48 0" width=".7" height=".1" depth=".7" color="#5a3020"></a-box>
+    <a-box position="0 .95 -.33" width=".7" height=".85" depth=".1" color="#5a3020"></a-box>
+    <a-cylinder position="-.3 .22 -.3" radius=".04" height=".44" color="#3a1e0e"></a-cylinder>
+    <a-cylinder position=" .3 .22 -.3" radius=".04" height=".44" color="#3a1e0e"></a-cylinder>
+    <a-cylinder position="-.3 .22  .3" radius=".04" height=".44" color="#3a1e0e"></a-cylinder>
+    <a-cylinder position=" .3 .22  .3" radius=".04" height=".44" color="#3a1e0e"></a-cylinder>
+  </a-entity>
+
+  <!-- READING CHAIR -->
+  <a-entity data-role="furniture" position="-3.5 0 -8" rotation="0 40 0">
+    <a-box position="0 .48 0" width=".9" height=".12" depth=".9" color="#6a3828"></a-box>
+    <a-box position="0 1.0 -.4" width=".9" height="1" depth=".12" color="#6a3828"></a-box>
+    <a-box position="-.42 .72 0" width=".12" height=".55" depth=".7" color="#6a3828"></a-box>
+    <a-box position=" .42 .72 0" width=".12" height=".55" depth=".7" color="#6a3828"></a-box>
+    <a-cylinder position="-.35 .22 -.35" radius=".05" height=".44" color="#3a1e0e"></a-cylinder>
+    <a-cylinder position=" .35 .22 -.35" radius=".05" height=".44" color="#3a1e0e"></a-cylinder>
+    <a-cylinder position="-.35 .22  .35" radius=".05" height=".44" color="#3a1e0e"></a-cylinder>
+    <a-cylinder position=" .35 .22  .35" radius=".05" height=".44" color="#3a1e0e"></a-cylinder>
+  </a-entity>
+  <!-- Side table + floor lamp -->
+  <a-entity data-role="furniture" position="-2.2 0 -7.2">
+    <a-cylinder position="0 .58 0" radius=".28" height=".06" color="#4a3218"></a-cylinder>
+    <a-cylinder position="0 .30 0" radius=".04" height=".58" color="#3a2410"></a-cylinder>
+    <a-cylinder position="0 .04 0" radius=".22" height=".08" color="#4a3218"></a-cylinder>
+    <a-cylinder position="0 .7 0" radius=".018" height=".28" color="#888"></a-cylinder>
+    <a-cone position="0 .94 0" radius-bottom=".18" radius-top=".04" height=".22" color="#d4c090"></a-cone>
+  </a-entity>
+
+  <!-- RUGS -->
+  <a-plane position="0 .003 -1" rotation="-90 0 0" width="4" height="5" color="#7a2828" opacity=".9" transparent="true"></a-plane>
+  <a-plane position="-3.5 .003 -8" rotation="-90 0 0" width="3" height="3" color="#283878" opacity=".8" transparent="true"></a-plane>
+
+  <!-- PLANTS -->
+  <a-entity data-role="plant" position="-5.5 0 5">
+    <a-cylinder position="0 .25 0" radius=".2" height=".5" color="#4a3520"></a-cylinder>
+    <a-sphere position="0 .95 0" radius=".6" color="#2a5820"></a-sphere>
+    <a-sphere position="-.3 1.2 .2" radius=".38" color="#386828"></a-sphere>
+  </a-entity>
+  <a-entity data-role="plant" position="5.5 0 5">
+    <a-cylinder position="0 .25 0" radius=".2" height=".5" color="#4a3520"></a-cylinder>
+    <a-sphere position="0 .95 0" radius=".6" color="#2a5820"></a-sphere>
+    <a-sphere position=".3 1.1 -.2" radius=".35" color="#386828"></a-sphere>
+  </a-entity>
+  <a-entity data-role="plant" position="5.5 0 -10">
+    <a-cylinder position="0 .3 0" radius=".22" height=".6" color="#4a3520"></a-cylinder>
+    <a-sphere position="0 1.1 0" radius=".65" color="#2a5820"></a-sphere>
+  </a-entity>
+
+  <!-- COLUMNS -->
+  <a-cylinder class="col" position="-4.5 2.5  4" radius=".14" height="5" color="#c8b898" segments-radial="14"></a-cylinder>
+  <a-cylinder class="col" position=" 4.5 2.5  4" radius=".14" height="5" color="#c8b898" segments-radial="14"></a-cylinder>
+  <a-cylinder class="col" position="-4.5 2.5 -3" radius=".14" height="5" color="#c8b898" segments-radial="14"></a-cylinder>
+  <a-cylinder class="col" position=" 4.5 2.5 -3" radius=".14" height="5" color="#c8b898" segments-radial="14"></a-cylinder>
+  <a-cylinder class="col" position="-4.5 2.5 -10" radius=".14" height="5" color="#c8b898" segments-radial="14"></a-cylinder>
+  <a-cylinder class="col" position=" 4.5 2.5 -10" radius=".14" height="5" color="#c8b898" segments-radial="14"></a-cylinder>
+
+  <!-- PENDANT LIGHT FIXTURES -->
+  <a-cylinder position="-3 4.88  2" radius=".14" height=".08" color="#d4c48a"></a-cylinder>
+  <a-cylinder position=" 3 4.88  2" radius=".14" height=".08" color="#d4c48a"></a-cylinder>
+  <a-cylinder position="-3 4.88 -4" radius=".14" height=".08" color="#d4c48a"></a-cylinder>
+  <a-cylinder position=" 3 4.88 -4" radius=".14" height=".08" color="#d4c48a"></a-cylinder>
+  <a-cylinder position="-3 4.88 -10" radius=".14" height=".08" color="#d4c48a"></a-cylinder>
+  <a-cylinder position=" 3 4.88 -10" radius=".14" height=".08" color="#d4c48a"></a-cylinder>
+  <a-cone position="-3 4.6  2"  radius-bottom=".22" radius-top=".08" height=".28" color="#d4c080" open-ended="true"></a-cone>
+  <a-cone position=" 3 4.6  2"  radius-bottom=".22" radius-top=".08" height=".28" color="#d4c080" open-ended="true"></a-cone>
+  <a-cone position="-3 4.6 -4"  radius-bottom=".22" radius-top=".08" height=".28" color="#d4c080" open-ended="true"></a-cone>
+  <a-cone position=" 3 4.6 -4"  radius-bottom=".22" radius-top=".08" height=".28" color="#d4c080" open-ended="true"></a-cone>
+  <a-cone position="-3 4.6 -10" radius-bottom=".22" radius-top=".08" height=".28" color="#d4c080" open-ended="true"></a-cone>
+  <a-cone position=" 3 4.6 -10" radius-bottom=".22" radius-top=".08" height=".28" color="#d4c080" open-ended="true"></a-cone>
+
+  <!-- ══ LIGHTS (all JS-controlled) ══ -->
+  <a-light id="L-amb"   type="ambient"     color="#ffa040" intensity=".40"></a-light>
+  <a-light id="L-fire"  type="point" position="-6 1.2 -9" color="#ff7010" intensity="2.2" distance="8" decay="2"
+    animation="property:intensity;from:1.6;to:2.8;dur:650;dir:alternate;loop:true;easing:easeInOutSine"></a-light>
+  <a-light id="L-d1"    type="point" position="-3 4.3  2"  color="#ffcc70" intensity="1.1" distance="7" decay="2"></a-light>
+  <a-light id="L-d2"    type="point" position=" 3 4.3  2"  color="#ffcc70" intensity="1.1" distance="7" decay="2"></a-light>
+  <a-light id="L-d3"    type="point" position="-3 4.3 -4"  color="#ffcc70" intensity="1.1" distance="7" decay="2"></a-light>
+  <a-light id="L-d4"    type="point" position=" 3 4.3 -4"  color="#ffcc70" intensity="1.1" distance="7" decay="2"></a-light>
+  <a-light id="L-d5"    type="point" position="-3 4.3 -10" color="#ffcc70" intensity="1.1" distance="7" decay="2"></a-light>
+  <a-light id="L-d6"    type="point" position=" 3 4.3 -10" color="#ffcc70" intensity="1.1" distance="7" decay="2"></a-light>
+  <a-light id="L-spot"  type="spot"  position="0 4.5 -1" rotation="-90 0 0" color="#fff5d0" intensity="1.4" distance="6" angle="35" penumbra=".4" decay="2"></a-light>
+  <a-light id="L-win"   type="directional" position="-6 3 1" color="#c8e0ff" intensity=".55"></a-light>
+  <a-light id="L-winp1" type="point" position="-5 1.5  1"  color="#d0e8ff" intensity=".5" distance="4" decay="2"></a-light>
+  <a-light id="L-winp2" type="point" position="-5 1.5 -6"  color="#d0e8ff" intensity=".5" distance="4" decay="2"></a-light>
+  <a-light id="L-lamp"  type="point" position="-2.2 1.0 -7.2" color="#ffdd90" intensity=".9" distance="4" decay="2"></a-light>
+  <a-light id="L-fill"  type="point" position="-4 1.5 -6" color="#ff9040" intensity=".5" distance="5" decay="2"></a-light>
+  <a-light id="L-board" type="spot" position="0 3.2 -1" rotation="-90 0 0" color="#fff0c8" intensity="1.1" distance="4" angle="28" penumbra=".35" decay="2"></a-light>
+
+</a-scene>
+
+<script>
+
+// ════════════════════════════════════════════════════
+//  VISIBLE 3D CHESS SET ON TABLE
+// ════════════════════════════════════════════════════
+function makeEl(tag, attrs, parent){
+  const el = document.createElement(tag);
+  Object.entries(attrs || {}).forEach(([k,v]) => el.setAttribute(k, v));
+  parent.appendChild(el);
+  return el;
+}
+function matString(color, metalness, roughness){
+  return `color:${color};metalness:${metalness};roughness:${roughness}`;
+}
+function addPart(parent, tag, attrs){ return makeEl(tag, attrs, parent); }
+function addRing(parent, y, radius, tube, mat){
+  addPart(parent, 'a-torus', {position:`0 ${y} 0`, rotation:'90 0 0', radius:`${radius}`, 'radius-tubular':`${tube}`, 'segments-radial':'40', 'segments-tubular':'10', material:mat});
+}
+function addChessPiece(parent, type, color, x, z, r, c){
+  const isWhite = color === 'white';
+  const main = isWhite ? '#f0dcc2' : '#10100f';
+  const trim = isWhite ? '#b67a2c' : '#3b2412';
+  const shine = isWhite ? '#fff4df' : '#343434';
+  const matMain = matString(main, isWhite ? .18 : .45, isWhite ? .24 : .16);
+  const matTrim = matString(trim, .35, .18);
+  const matShine = matString(shine, .55, .10);
+  const facing = (type === 'knight') ? (isWhite ? '0 180 0' : '0 0 0') : '0 0 0';
+  const piece = makeEl('a-entity', {position:`${x} .018 ${z}`, rotation:facing, class:'chess-piece', 'data-square':`${r},${c}`}, parent);
+
+  makeEl('a-cylinder', {position:'0 .22 0', radius:'.085', height:'.46', material:'opacity:.001;transparent:true', class:'chess-interactive', 'data-square':`${r},${c}`}, piece);
+
+  addPart(piece, 'a-cylinder', {position:'0 .018 0', radius:'.060', height:'.036', 'segments-radial':'48', material:matTrim});
+  addRing(piece, .040, .054, .006, matTrim);
+  addPart(piece, 'a-cylinder', {position:'0 .065 0', radius:'.047', height:'.050', 'segments-radial':'48', material:matMain});
+  addRing(piece, .092, .043, .005, matShine);
+
+  if(type === 'pawn'){
+    addPart(piece, 'a-cylinder', {position:'0 .138 0', radius:'.024', height:'.090', 'segments-radial':'40', material:matMain});
+    addRing(piece, .180, .030, .004, matTrim);
+    addPart(piece, 'a-sphere', {position:'0 .230 0', radius:'.040', 'segments-width':'32', 'segments-height':'16', material:matMain});
+  } else if(type === 'rook'){
+    addPart(piece, 'a-cylinder', {position:'0 .150 0', radius:'.034', height:'.120', 'segments-radial':'48', material:matMain});
+    addRing(piece, .215, .041, .005, matTrim);
+    addPart(piece, 'a-cylinder', {position:'0 .245 0', radius:'.048', height:'.045', 'segments-radial':'48', material:matMain});
+    for(const [px,pz,rot] of [[0,.041,0],[.041,0,90],[0,-.041,0],[-.041,0,90]]){
+      addPart(piece, 'a-box', {position:`${px} .282 ${pz}`, rotation:`0 ${rot} 0`, width:'.030', height:'.036', depth:'.018', material:matTrim});
+    }
+  } else if(type === 'knight'){
+    // Compact horse model. White knights are rotated above so they face the black side.
+    addPart(piece, 'a-cylinder', {position:'0 .120 0', radius:'.032', height:'.078', 'segments-radial':'40', material:matMain});
+    addRing(piece, .168, .037, .0045, matTrim);
+    addPart(piece, 'a-sphere', {position:'0 .198 .000', radius:'.040', scale:'.95 .76 1.05', 'segments-width':'32', 'segments-height':'16', material:matMain});
+    addPart(piece, 'a-cylinder', {position:'0 .246 .018', rotation:'-22 0 0', radius:'.020', height:'.096', 'segments-radial':'28', material:matMain});
+    addPart(piece, 'a-sphere', {position:'0 .300 .052', radius:'.031', scale:'1 .82 1.20', 'segments-width':'32', 'segments-height':'16', material:matMain});
+    addPart(piece, 'a-box', {position:'0 .290 .087', rotation:'-8 0 0', width:'.041', height:'.021', depth:'.050', material:matMain});
+    addPart(piece, 'a-box', {position:'0 .279 .114', rotation:'-8 0 0', width:'.032', height:'.017', depth:'.030', material:matMain});
+    addPart(piece, 'a-cone', {position:'-.014 .332 .043', rotation:'-16 0 0', 'radius-bottom':'.0075', 'radius-top':'.001', height:'.030', 'segments-radial':'10', material:matTrim});
+    addPart(piece, 'a-cone', {position:'.014 .332 .043', rotation:'-16 0 0', 'radius-bottom':'.0075', 'radius-top':'.001', height:'.030', 'segments-radial':'10', material:matTrim});
+    addPart(piece, 'a-sphere', {position:'-.012 .300 .096', radius:'.0045', material:matShine});
+    addPart(piece, 'a-sphere', {position:'.012 .300 .096', radius:'.0045', material:matShine});
+    for(let i=0;i<5;i++) addPart(piece, 'a-box', {position:`0 ${.312-i*.017} ${.022-i*.005}`, rotation:'-22 0 0', width:'.010', height:'.017', depth:'.008', material:matTrim});
+    addPart(piece, 'a-box', {position:'0 .258 -.016', rotation:'-22 0 0', width:'.014', height:'.090', depth:'.011', material:matTrim});
+    addPart(piece, 'a-cylinder', {position:'0 .168 .034', rotation:'90 0 0', radius:'.038', height:'.010', 'segments-radial':'32', material:matTrim});
+  } else if(type === 'bishop'){
+    addPart(piece, 'a-cylinder', {position:'0 .140 0', radius:'.028', height:'.100', 'segments-radial':'44', material:matMain});
+    addRing(piece, .196, .034, .005, matTrim);
+    addPart(piece, 'a-sphere', {position:'0 .250 0', radius:'.049', scale:'1 1.24 1', 'segments-width':'32', 'segments-height':'16', material:matMain});
+    addPart(piece, 'a-box', {position:'0 .271 .038', rotation:'-24 0 0', width:'.010', height:'.070', depth:'.008', material:matTrim});
+    addPart(piece, 'a-sphere', {position:'0 .326 0', radius:'.014', material:matTrim});
+  } else if(type === 'queen'){
+    addPart(piece, 'a-cylinder', {position:'0 .150 0', radius:'.032', height:'.120', 'segments-radial':'48', material:matMain});
+    addRing(piece, .214, .040, .005, matTrim);
+    addPart(piece, 'a-sphere', {position:'0 .255 0', radius:'.048', scale:'1 1.05 1', 'segments-width':'32', 'segments-height':'16', material:matMain});
+    for(let i=0;i<8;i++){
+      const a=i*Math.PI/4, px=Math.cos(a)*.040, pz=Math.sin(a)*.040;
+      addPart(piece, 'a-cone', {position:`${px} .323 ${pz}`, 'radius-bottom':'.010', 'radius-top':'.002', height:'.045', 'segments-radial':'12', material:matTrim});
+    }
+    addPart(piece, 'a-sphere', {position:'0 .352 0', radius:'.018', material:matShine});
+  } else if(type === 'king'){
+    addPart(piece, 'a-cylinder', {position:'0 .154 0', radius:'.033', height:'.126', 'segments-radial':'48', material:matMain});
+    addRing(piece, .220, .040, .005, matTrim);
+    addPart(piece, 'a-sphere', {position:'0 .265 0', radius:'.047', scale:'1 1.08 1', 'segments-width':'32', 'segments-height':'16', material:matMain});
+    addPart(piece, 'a-cylinder', {position:'0 .322 0', radius:'.015', height:'.034', 'segments-radial':'24', material:matTrim});
+    addPart(piece, 'a-box', {position:'0 .358 0', width:'.018', height:'.070', depth:'.018', material:matTrim});
+    addPart(piece, 'a-box', {position:'0 .374 0', width:'.066', height:'.014', depth:'.014', material:matTrim});
+  }
+}
+function create3DChessSet(){
+  const root = document.getElementById('table-chess-set');
+  if(!root || root.dataset.built === 'true') return;
+  root.dataset.built = 'true';
+  const boardSize = 1.22, square = boardSize/8, start = -boardSize/2 + square/2;
+  // Layering matters: frame sits below; individual 8x8 squares sit on top.
+  makeEl('a-box', {position:'0 -.050 0', width:'1.42', height:'.050', depth:'1.42', material:'color:#180f07;metalness:.12;roughness:.28'}, root);
+  makeEl('a-box', {position:'0 -.022 0', width:'1.34', height:'.030', depth:'1.34', material:'color:#5a3317;metalness:.18;roughness:.22'}, root);
+  makeEl('a-box', {position:'0 -.004 0', width:'1.25', height:'.012', depth:'1.25', material:'color:#2b1a0c;metalness:.14;roughness:.20'}, root);
+  for(let r=0; r<8; r++) for(let c=0; c<8; c++){
+    const isLight = (r+c)%2===0;
+    const baseMat = isLight ? 'color:#e7c184;metalness:.05;roughness:.24' : 'color:#22130a;metalness:.12;roughness:.18';
+    const sq = makeEl('a-box', {position:`${start+c*square} .006 ${start+r*square}`, width:`${square*.985}`, height:'.008', depth:`${square*.985}`, material:baseMat, class:'chess-interactive chess-square'}, root);
+    sq.setAttribute('data-square', `${r},${c}`);
+    sq.setAttribute('data-base-material', baseMat);
+    sq.addEventListener('click', on3DChessClick);
+  }
+  makeEl('a-entity', {id:'table-chess-highlights'}, root);
+  makeEl('a-entity', {id:'table-chess-pieces'}, root);
+  update3DChessPieces();
+}
+function pieceTypeFromChar(p){
+  return {p:'pawn', r:'rook', n:'knight', b:'bishop', q:'queen', k:'king'}[p.toLowerCase()] || 'pawn';
+}
+function update3DChessPieces(){
+  const piecesRoot = document.getElementById('table-chess-pieces');
+  if(!piecesRoot || !board) return;
+  piecesRoot.innerHTML = '';
+  const boardSize = 1.22, square = boardSize/8, start = -boardSize/2 + square/2;
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++){
+    const p = board[r][c]; if(!p) continue;
+    addChessPiece(piecesRoot, pieceTypeFromChar(p), isW(p)?'white':'black', start+c*square, start+r*square, r, c);
+  }
+  piecesRoot.querySelectorAll('.chess-interactive').forEach(el=>el.addEventListener('click', on3DChessClick));
+  refresh3DHighlights();
+}
+
+
+function on3DChessClick(evt){
+  evt.stopPropagation();
+  const hit = evt.target;
+  const ds = hit.getAttribute('data-square') || hit.parentElement?.getAttribute('data-square');
+  if(!ds) return;
+  const [r,c] = ds.split(',').map(Number);
+  handleSquareSelection(r,c);
+}
+function refresh3DHighlights(){
+  const root = document.getElementById('table-chess-set');
+  const hi = document.getElementById('table-chess-highlights');
+  if(!root || !hi) return;
+  hi.innerHTML = '';
+  const boardSize = 1.22, square = boardSize/8, start = -boardSize/2 + square/2;
+  const marker = (r,c,color,opacity='0.45') => {
+    const m = makeEl('a-plane', {
+      position:`${start+c*square} .019 ${start+r*square}`,
+      rotation:'-90 0 0', width:`${square*.72}`, height:`${square*.72}`,
+      material:`color:${color};transparent:true;opacity:${opacity};side:double;shader:flat`,
+      class:'chess-interactive chess-highlight', 'data-square':`${r},${c}`
+    }, hi);
+    m.addEventListener('click', on3DChessClick);
+  };
+  if(!sel) return;
+  for(const [r,c] of getMoves(sel[0], sel[1])) marker(r,c, board[r][c] ? '#ff4538' : '#39d353', board[r][c] ? '.55' : '.38');
+  marker(sel[0], sel[1], '#ffd43b', '.55');
+}
+
+// ════════════════════════════════════════════════════
+//  STATE
+// ════════════════════════════════════════════════════
+let currentCeiling = 'high';
+let currentLight   = 'warm_dim';
+let gameMode = 'ai';
+let aiDifficulty = 'standard';
+let socket = null;
+let multiplayerRoom = 'cogs160-chess';
+let isApplyingRemoteState = false;
+const logEntries   = [];
+
+// ════════════════════════════════════════════════════
+//  CEILING HEIGHT
+// ════════════════════════════════════════════════════
+const CEILINGS = {
+  low:  { h:2.4, label:'Low — 2.4 m',  desc:'Confined · analytic / detail focus',       tags:['L25 Coziness','↓L36 Awe','L14 Enclosure'],      ref:'Meyers-Levy & Zhu 2007: low→analytic' },
+  mid:  { h:3.2, label:'Mid — 3.2 m',  desc:'Neutral height · control condition',         tags:['Neutral','Control'],                              ref:'Vartanian 2015: mid baseline' },
+  high: { h:5.0, label:'High — 5.0 m', desc:'Grand · creative / abstract thinking',       tags:['L36 Awe','↑L25 Freedom','L17 Expansive'],        ref:'Meyers-Levy & Zhu 2007: high→creative' },
+};
+
+function setCeiling(key) {
+  const C = CEILINGS[key]; if (!C) return;
+  currentCeiling = key;
+  const h = C.h, mid = h / 2;
+
+  // Ceiling plane
+  document.getElementById('ceiling').setAttribute('position', `0 ${h} -3`);
+
+  // Beams
+  for (const id of ['bm1','bm2','bm3','cb1','cb2','cb3']) {
+    const el = document.getElementById(id);
+    const p = el.getAttribute('position');
+    el.setAttribute('position', `${p.x} ${h - 0.12} ${p.z}`);
+  }
+
+  // Walls — height + y-center
+  for (const id of ['wback','wfront','wleft','wright']) {
+    const el = document.getElementById(id);
+    const p = el.getAttribute('position');
+    el.setAttribute('height', h);
+    el.setAttribute('position', `${p.x} ${mid} ${p.z}`);
+  }
+
+  // Crown moulding
+  const cy = h - 0.15;
+  document.getElementById('cr-back').setAttribute('position',  `0     ${cy} -11.89`);
+  document.getElementById('cr-left').setAttribute('position',  `-6.89 ${cy} -3`);
+  document.getElementById('cr-right').setAttribute('position', ` 6.89 ${cy} -3`);
+
+  // Columns
+  document.querySelectorAll('.col').forEach(el => {
+    const p = el.getAttribute('position');
+    el.setAttribute('height', h);
+    el.setAttribute('position', `${p.x} ${mid} ${p.z}`);
+  });
+
+  // Buttons
+  document.querySelectorAll('#panels .panel:first-child .pbtn').forEach(b => b.classList.remove('active'));
+  document.querySelector(`[onclick="setCeiling('${key}')"]`).classList.add('active');
+
+  // HUD + chess sub
+  updateHUD();
+  document.getElementById('ceil-label').textContent = C.label;
+  document.getElementById('s-ceil').textContent = key.charAt(0).toUpperCase()+key.slice(1);
+
+  logEvent('CEILING', `→ ${key} (${h}m) | ${C.ref}`);
+}
+
+// ════════════════════════════════════════════════════
+//  LIGHTING
+// ════════════════════════════════════════════════════
+const LIGHTS = {
+  warm_dim:    { label:'Warm Dim',    desc:'2700K low — creative / divergent baseline', tags:['↓L23 Arousal','L24 Warm','L25 Cozy'], amb:{c:'#ff9030',i:.22}, downs:{c:'#ffaa50',i:.55}, win:{c:'#ffe0b0',i:.2},  fire:2.0, bg:'#100804', fog:'#100804', ref:'Knez 2001: warm dim→creative' },
+  warm_bright: { label:'Warm Bright', desc:'2700K high — alert comfort, sustained attention', tags:['L23 Mid','L24 Warm','L26 Comfort'], amb:{c:'#ffb060',i:.50}, downs:{c:'#ffcc80',i:1.4}, win:{c:'#ffe8c0',i:.6},  fire:1.8, bg:'#120c06', fog:'#120c06', ref:'Küller 2006: warm bright→positive affect' },
+  cool_bright: { label:'Cool Bright', desc:'6500K high — analytic / convergent focus',  tags:['↑L23 Arousal','L24 Cool','L26 High'], amb:{c:'#c0d8ff',i:.60}, downs:{c:'#ddeeff',i:1.6}, win:{c:'#e8f4ff',i:.9},  fire:.3,  bg:'#06080e', fog:'#06080e', ref:'Knez 2001: cool bright→analytic' },
+  cool_dim:    { label:'Cool Dim',    desc:'6500K low — fatigue / impaired performance', tags:['↓L23 Arousal','L24 Cool','↓L26'],     amb:{c:'#7888a8',i:.16}, downs:{c:'#a0b8d0',i:.32}, win:{c:'#b0c8e8',i:.28}, fire:.15, bg:'#040508', fog:'#040508', ref:'Veitch 1998: cool dim→fatigue' },
+};
+const DOWN_IDS = ['L-d1','L-d2','L-d3','L-d4','L-d5','L-d6'];
+
+function setLight(key) {
+  const L = LIGHTS[key]; if (!L) return;
+  currentLight = key;
+
+  document.getElementById('L-amb').setAttribute('color', L.amb.c);
+  document.getElementById('L-amb').setAttribute('intensity', L.amb.i);
+  DOWN_IDS.forEach(id => {
+    document.getElementById(id).setAttribute('color', L.downs.c);
+    document.getElementById(id).setAttribute('intensity', L.downs.i);
+  });
+  document.getElementById('L-win').setAttribute('color', L.win.c);
+  document.getElementById('L-win').setAttribute('intensity', L.win.i);
+  document.getElementById('L-winp1').setAttribute('color', L.win.c);
+  document.getElementById('L-winp2').setAttribute('color', L.win.c);
+  document.getElementById('L-fire').setAttribute('intensity', L.fire);
+
+  document.getElementById('scene').setAttribute('background', `color:${L.bg}`);
+  document.getElementById('scene').setAttribute('fog', `type:linear;color:${L.fog};near:16;far:32`);
+
+  // Buttons
+  document.querySelectorAll('#panels .panel:last-child .pbtn').forEach(b => b.classList.remove('active'));
+  document.querySelector(`[onclick="setLight('${key}')"]`).classList.add('active');
+
+  updateHUD();
+  document.getElementById('light-label').textContent = L.label;
+  document.getElementById('s-light').textContent = L.label;
+
+  logEvent('LIGHT', `→ ${key} | ${L.ref}`);
+}
+
+function updateHUD() {
+  const C = CEILINGS[currentCeiling], L = LIGHTS[currentLight];
+  document.getElementById('cond-name').textContent = `${C.label.split('—')[0].trim()} · ${L.label}`;
+  document.getElementById('cond-desc').textContent = `${C.h}m · ${L.desc}`;
+  const all = [...C.tags, ...L.tags];
+  document.getElementById('tags').innerHTML = all.map(t=>`<span class="tag">${t}</span>`).join('');
+}
+
+
+
+// ════════════════════════════════════════════════════
+//  TASK 2 PARAMETRIC ENVIRONMENT SYSTEM
+// ════════════════════════════════════════════════════
+const sceneParams = {
+  version: 'task2-v18-true-sphere-shell',
+  room_id: 'procedural-cogs160-vr-lab-01',
+  ceilingHeight_m: 5.0,
+  lightingCCT_K: 2700,
+  lightIntensity: 0.40,
+  wallRoughness: 0.80,
+  wallColor: '#d4c4a8',
+  wallColorLabel: 'warm plaster',
+  plantCount: 3,
+  furnitureVisible: true,
+  ambientAudio: 'fireplace',
+  wallBow: 0.0,
+  ceilingDome: 0.0,
+  cognitiveTask: '3D chess with AI/human conditions',
+  manipulationClasses: ['geometry','lighting','materials','color','biophilic elements','furniture layout','acoustic properties','visual complexity']
+};
+
+const MESH_ROLES = {
+  ceiling: ['ceiling'],
+  beams: ['bm1','bm2','bm3','cb1','cb2','cb3'],
+  walls: ['wback','wfront','wleft','wright'],
+  north_wall: ['wback'],
+  south_wall: ['wfront'],
+  west_wall: ['wleft'],
+  east_wall: ['wright'],
+  columns: ['.col'],
+  lights: ['L-amb','L-d1','L-d2','L-d3','L-d4','L-d5','L-d6','L-spot','L-win','L-winp1','L-winp2','L-fire','L-lamp','L-fill'],
+  plants: ['[data-role="plant"]'],
+  furniture: ['[data-role="furniture"]'],
+  curved_walls: ['curved-room-shell.leftWall','curved-room-shell.rightWall','curved-room-shell.backWall','curved-room-shell.frontWall'],
+  curved_ceiling: ['curved-room-shell.ceilingDome']
+};
+
+function clamp(v,min,max){ return Math.max(min, Math.min(max, v)); }
+function hexToRgb(hex){ const h=hex.replace('#',''); return [parseInt(h.slice(0,2),16),parseInt(h.slice(2,4),16),parseInt(h.slice(4,6),16)]; }
+function rgbToHex(r,g,b){ return '#'+[r,g,b].map(x=>Math.round(clamp(x,0,255)).toString(16).padStart(2,'0')).join(''); }
+function lerp(a,b,t){ return a+(b-a)*t; }
+function cctToHex(k){
+  const t = clamp((k-2700)/(6500-2700),0,1);
+  const warm = hexToRgb('#ffb56b'), cool = hexToRgb('#d8ecff');
+  return rgbToHex(lerp(warm[0],cool[0],t), lerp(warm[1],cool[1],t), lerp(warm[2],cool[2],t));
+}
+
+
+function makeGridGeometry(cols, rows, vertexFn){
+  const positions = [], uvs = [], indices = [];
+  for(let r=0;r<=rows;r++) for(let c=0;c<=cols;c++){
+    const u=c/cols, v=r/rows, p=vertexFn(u,v);
+    positions.push(p.x,p.y,p.z); uvs.push(u,v);
+  }
+  for(let r=0;r<rows;r++) for(let c=0;c<cols;c++){
+    const a=r*(cols+1)+c, b=a+1, d=(r+1)*(cols+1)+c, e=d+1;
+    indices.push(a,d,b, b,d,e);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(positions,3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uvs,2));
+  g.setIndex(indices); g.computeVertexNormals();
+  return g;
+}
+
+function curvedStateLabel(v, positive, negative, neutral){
+  if(v > 0.03) return `${v.toFixed(2)} · ${positive}`;
+  if(v < -0.03) return `${v.toFixed(2)} · ${negative}`;
+  return `${v.toFixed(2)} · ${neutral}`;
+}
+
+function applyCurvedRoomShell(){
+  const shell = document.getElementById('curved-room-shell');
+  if(!shell || !window.THREE) return;
+
+  const wallBow = clamp(Number(sceneParams.wallBow)||0,-1,1);
+  const ceilingDome = clamp(Number(sceneParams.ceilingDome)||0,-1,1);
+  const useCurved = Math.abs(wallBow) > 0.02 || Math.abs(ceilingDome) > 0.02;
+
+  shell.setAttribute('visible', useCurved);
+  shell.object3D.clear();
+
+  const flatShellIds = [
+    'wback','wfront','wleft','wright','ceiling',
+    'bm1','bm2','bm3','cb1','cb2','cb3',
+    'cr-back','cr-left','cr-right'
+  ];
+  flatShellIds.forEach(id=>{
+    const el=document.getElementById(id);
+    if(el) el.setAttribute('visible', !useCurved);
+  });
+  if(!useCurved) return;
+
+  const width=14, depth=22, zCenter=-3, halfW=width/2, halfD=depth/2;
+  const zMin=zCenter-halfD, zMax=zCenter+halfD, xMin=-halfW, xMax=halfW;
+  const h=clamp(Number(sceneParams.ceilingHeight_m)||5,2,6);
+
+  const wallColor = new THREE.Color(sceneParams.wallColor||'#d4a062');
+  const wallRough = clamp(Number(sceneParams.wallRoughness)||.8,0,1);
+
+  const wallMat=new THREE.MeshStandardMaterial({
+    color:wallColor,
+    roughness:wallRough,
+    metalness:0,
+    side:THREE.DoubleSide
+  });
+  const ceilMat=new THREE.MeshStandardMaterial({
+    color:new THREE.Color('#dba064'),
+    roughness:.88,
+    metalness:0,
+    side:THREE.DoubleSide
+  });
+
+  const smooth = t => t*t*(3-2*t);
+  const spanFalloff = t => Math.sin(Math.PI*t);
+  const heightFalloff = v => smooth(v);
+  const zAt = u => zMin + u*depth;
+  const xAt = u => xMin + u*width;
+  const wallY = v => v*h;
+
+  // IMPORTANT: when BOTH positive controls approach +1, switch to a single continuous
+  // ellipsoid/hemisphere shell. Four bowed planes can never visually read as a sphere.
+  // This makes max Wall Bow + max Ceiling Dome become an actual sphere-like room.
+  const sphereAmount = Math.max(0, Math.min(wallBow, ceilingDome));
+  if(sphereAmount > 0.72){
+    const rx = halfW * (1.00 + 0.42 * sphereAmount);   // side radius grows outward
+    const rz = halfD * (1.00 + 0.28 * sphereAmount);   // back/front radius grows outward
+    const ry = h * (1.00 + 0.78 * sphereAmount);       // dome height grows upward
+    const segTheta = 96, segPhi = 48;
+    const positions=[], uvs=[], indices=[];
+
+    // phi=0 is the floor rim, phi=PI/2 is the crown of the dome.
+    // The camera is INSIDE this shell, so we use BackSide material below.
+    for(let j=0;j<=segPhi;j++){
+      const v=j/segPhi;
+      const phi=v*Math.PI/2;
+      const cp=Math.cos(phi), sp=Math.sin(phi);
+      for(let i=0;i<=segTheta;i++){
+        const u=i/segTheta;
+        const th=u*Math.PI*2;
+        const x=rx*cp*Math.cos(th);
+        const z=zCenter + rz*cp*Math.sin(th);
+        const y=ry*sp;
+        positions.push(x,y,z); uvs.push(u,v);
+      }
+    }
+    for(let j=0;j<segPhi;j++) for(let i=0;i<segTheta;i++){
+      const a=j*(segTheta+1)+i, b=a+1, c=(j+1)*(segTheta+1)+i, d=c+1;
+      // Reverse winding for clean interior visibility.
+      indices.push(a,b,c, b,d,c);
+    }
+    const geo=new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions,3));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs,2));
+    geo.setIndex(indices); geo.computeVertexNormals();
+
+    const sphereMat=new THREE.MeshStandardMaterial({
+      color:wallColor,
+      roughness:wallRough,
+      metalness:0,
+      side:THREE.BackSide
+    });
+    const sphereMesh=new THREE.Mesh(geo, sphereMat);
+    sphereMesh.name='curved-room-shell.trueSphereInterior';
+    shell.object3D.add(sphereMesh);
+
+    // Add a subtle equator/base ring so the spherical shell reads as architectural, not broken.
+    const ringGeo = new THREE.TorusGeometry(1, .035, 8, 128);
+    const ring = new THREE.Mesh(ringGeo, new THREE.MeshStandardMaterial({color:'#a07038', roughness:.75, side:THREE.DoubleSide}));
+    ring.name='curved-room-shell.sphereBaseRing';
+    ring.scale.set(rx, rz, 1);
+    ring.rotation.x = Math.PI/2;
+    ring.position.set(0,.04,zCenter);
+    shell.object3D.add(ring);
+
+    logEvent('PARAM','true spherical room shell active');
+    return;
+  }
+
+  // Normal bidirectional curvature mode: works for square, partial convex, and concave cases.
+  const maxWallBowX = halfW * 0.82;
+  const maxWallBowZ = halfD * 0.55;
+  const maxDomeRise = h * 0.85;
+  const maxDomeDrop = h * 0.48;
+  const sideOffset = (u,v) => wallBow * maxWallBowX * spanFalloff(u) * heightFalloff(v);
+  const endOffset  = (u,v) => wallBow * maxWallBowZ * spanFalloff(u) * heightFalloff(v);
+
+  function domeY(x,z){
+    const nx = x / halfW;
+    const nz = (z-zCenter) / halfD;
+    const r = Math.sqrt(nx*nx + nz*nz);
+    const domeProfile = clamp(1 - r*r, 0, 1);
+    if(ceilingDome >= 0) return h + ceilingDome * maxDomeRise * domeProfile;
+    return h + ceilingDome * maxDomeDrop * domeProfile;
+  }
+
+  const liftBlend = Math.max(0, Math.min(wallBow, ceilingDome));
+  const geos={
+    leftWall: makeGridGeometry(56,32,(u,v)=>({
+      x:xMin - sideOffset(u,v),
+      y:wallY(v) + liftBlend * maxDomeRise * 0.18 * Math.pow(v,2) * spanFalloff(u),
+      z:zAt(u)
+    })),
+    rightWall: makeGridGeometry(56,32,(u,v)=>({
+      x:xMax + sideOffset(u,v),
+      y:wallY(v) + liftBlend * maxDomeRise * 0.18 * Math.pow(v,2) * spanFalloff(u),
+      z:zAt(u)
+    })),
+    backWall: makeGridGeometry(56,32,(u,v)=>({
+      x:xAt(u),
+      y:wallY(v) + liftBlend * maxDomeRise * 0.18 * Math.pow(v,2) * spanFalloff(u),
+      z:zMin - endOffset(u,v)
+    })),
+    frontWall: makeGridGeometry(56,32,(u,v)=>({
+      x:xAt(u),
+      y:wallY(v) + liftBlend * maxDomeRise * 0.18 * Math.pow(v,2) * spanFalloff(u),
+      z:zMax + endOffset(u,v)
+    })),
+    ceilingDome: makeGridGeometry(72,72,(u,v)=>{
+      const x=xAt(u), z=zAt(v);
+      return { x, y:domeY(x,z), z };
+    })
+  };
+
+  for(const [name,geo] of Object.entries(geos)){
+    const mesh=new THREE.Mesh(geo, name==='ceilingDome'?ceilMat:wallMat);
+    mesh.name='curved-room-shell.'+name;
+    shell.object3D.add(mesh);
+  }
+}
+function applyParametricScene(){
+  applyCurvedRoomShell();
+}
+
+function applyCeilingHeightMeters(h){
+  h = clamp(Number(h)||5, 2, 6);
+  sceneParams.ceilingHeight_m = h;
+  const mid = h/2;
+  document.getElementById('ceiling').setAttribute('position', `0 ${h} -3`);
+  for (const id of ['bm1','bm2','bm3','cb1','cb2','cb3']) {
+    const el = document.getElementById(id); if(!el) continue;
+    const p = el.getAttribute('position'); el.setAttribute('position', `${p.x} ${h - 0.12} ${p.z}`);
+  }
+  for (const id of ['wback','wfront','wleft','wright']) {
+    const el = document.getElementById(id); if(!el) continue;
+    const p = el.getAttribute('position'); el.setAttribute('height', h); el.setAttribute('position', `${p.x} ${mid} ${p.z}`);
+  }
+  const cy = h - 0.15;
+  [['cr-back',`0 ${cy} -11.89`],['cr-left',`-6.89 ${cy} -3`],['cr-right',`6.89 ${cy} -3`]].forEach(([id,pos])=>{ const el=document.getElementById(id); if(el) el.setAttribute('position',pos); });
+  document.querySelectorAll('.col').forEach(el => { const p=el.getAttribute('position'); el.setAttribute('height',h); el.setAttribute('position',`${p.x} ${mid} ${p.z}`); });
+  const label = h < 2.8 ? 'Low' : h < 4.0 ? 'Mid' : 'High';
+  currentCeiling = label.toLowerCase();
+  document.getElementById('ceil-label').textContent = `${label} — ${h.toFixed(1)} m`;
+  document.getElementById('s-ceil').textContent = label;
+}
+
+function applyParamLighting(){
+  const cct = sceneParams.lightingCCT_K, intensity = sceneParams.lightIntensity;
+  const lightColor = cctToHex(cct);
+  const ambient = document.getElementById('L-amb');
+  if(ambient){ ambient.setAttribute('color', lightColor); ambient.setAttribute('intensity', clamp(intensity*.75,0.05,1.2)); }
+  DOWN_IDS.forEach(id => { const el=document.getElementById(id); if(el){ el.setAttribute('color', lightColor); el.setAttribute('intensity', clamp(intensity*1.7,0,2.2)); }});
+  ['L-win','L-winp1','L-winp2','L-spot'].forEach(id=>{ const el=document.getElementById(id); if(el){ el.setAttribute('color', lightColor); el.setAttribute('intensity', clamp(intensity*.9,0,1.6)); }});
+  const fire=document.getElementById('L-fire'); if(fire) fire.setAttribute('intensity', cct < 3800 ? clamp(1.2+intensity,0,3) : .25);
+  const scene=document.getElementById('scene');
+  const bg = cct < 4200 ? '#100804' : '#050812';
+  scene.setAttribute('background', `color:${bg}`);
+  scene.setAttribute('fog', `type:linear;color:${bg};near:16;far:32`);
+  currentLight = `${cct}K_${intensity.toFixed(2)}`;
+  document.getElementById('light-label').textContent = `${cct}K · ${intensity.toFixed(2)}`;
+  document.getElementById('s-light').textContent = `${cct}K`;
+}
+
+function applyParamControls(){
+  const get = id => document.getElementById(id);
+  sceneParams.ceilingHeight_m = Number(get('param-ceiling')?.value || sceneParams.ceilingHeight_m);
+  sceneParams.lightingCCT_K = Number(get('param-cct')?.value || sceneParams.lightingCCT_K);
+  sceneParams.lightIntensity = Number(get('param-intensity')?.value || sceneParams.lightIntensity);
+  sceneParams.wallRoughness = Number(get('param-roughness')?.value || sceneParams.wallRoughness);
+  sceneParams.plantCount = Number(get('param-plants')?.value || sceneParams.plantCount);
+  sceneParams.furnitureVisible = Number(get('param-furniture')?.value || 0) === 1;
+  sceneParams.ambientAudio = get('param-audio')?.value || sceneParams.ambientAudio;
+  sceneParams.wallBow = Number(get('param-wallbow')?.value || sceneParams.wallBow);
+  sceneParams.ceilingDome = Number(get('param-ceilingdome')?.value || sceneParams.ceilingDome);
+
+  applyCeilingHeightMeters(sceneParams.ceilingHeight_m);
+  applyParamLighting();
+
+  for(const id of ['wback','wfront','wleft','wright']){
+    const el=document.getElementById(id); if(el) el.setAttribute('material', `color:${sceneParams.wallColor};roughness:${sceneParams.wallRoughness};metalness:0`);
+  }
+  document.querySelectorAll('[data-role="plant"]').forEach((el,i)=> el.setAttribute('visible', i < sceneParams.plantCount));
+  document.querySelectorAll('[data-role="furniture"]').forEach(el=> el.setAttribute('visible', sceneParams.furnitureVisible));
+  applyParametricScene();
+
+  const setOut = (id,txt)=>{ const el=get(id); if(el) el.textContent=txt; };
+  setOut('out-ceiling', `${sceneParams.ceilingHeight_m.toFixed(1)} m`);
+  setOut('out-cct', `${sceneParams.lightingCCT_K} K`);
+  setOut('out-intensity', sceneParams.lightIntensity.toFixed(2));
+  setOut('out-roughness', sceneParams.wallRoughness.toFixed(2));
+  setOut('out-plants', String(sceneParams.plantCount));
+  setOut('out-furniture', sceneParams.furnitureVisible ? 'on' : 'off');
+  setOut('out-wallbow', curvedStateLabel(sceneParams.wallBow, 'sphere/out', 'concave/in', 'square'));
+  setOut('out-ceilingdome', curvedStateLabel(sceneParams.ceilingDome, 'sphere dome', 'concave cave', 'flat'));
+  updateHUDParametric();
+}
+
+function setWallColor(hex,label,btn){
+  sceneParams.wallColor = hex; sceneParams.wallColorLabel = label;
+  document.getElementById('out-wallcolor').textContent = label;
+  document.querySelectorAll('.swatch').forEach(b=>b.classList.remove('active'));
+  if(btn) btn.classList.add('active');
+  applyParamControls();
+  logEvent('PARAM_COLOR', `${label} ${hex}`);
+}
+
+function updateHUDParametric(){
+  const c = sceneParams.ceilingHeight_m;
+  const cLabel = c < 2.8 ? 'Low Ceiling' : c < 4.0 ? 'Mid Ceiling' : 'High Ceiling';
+  document.getElementById('cond-name').textContent = `${cLabel} · ${sceneParams.lightingCCT_K}K`;
+  document.getElementById('cond-desc').textContent = `${c.toFixed(1)} m · intensity ${sceneParams.lightIntensity.toFixed(2)} · roughness ${sceneParams.wallRoughness.toFixed(2)} · plants ${sceneParams.plantCount}`;
+  document.getElementById('tags').innerHTML = sceneParams.manipulationClasses.slice(0,6).map(t=>`<span class="tag">${t}</span>`).join('');
+}
+
+function applyPreset(name){
+  const set = (id,val)=>{ const el=document.getElementById(id); if(el) el.value=val; };
+  if(name==='meyers_high'){
+    set('param-ceiling',5.0); set('param-cct',2700); set('param-intensity',.45); set('param-roughness',.85); set('param-plants',3); set('param-furniture',1); set('param-wallbow',0); set('param-ceilingdome',0);
+    setWallColor('#d4c4a8','warm plaster',document.getElementById('sw-warm'));
+  } else if(name==='low_analytic'){
+    set('param-ceiling',2.4); set('param-cct',6500); set('param-intensity',1.2); set('param-roughness',.35); set('param-plants',0); set('param-furniture',1); set('param-wallbow',-0.25); set('param-ceilingdome',-0.25);
+    setWallColor('#b8c8d8','cool blue-gray',document.getElementById('sw-cool'));
+  } else if(name==='curved_refuge'){
+    set('param-ceiling',4.4); set('param-cct',3000); set('param-intensity',.65); set('param-roughness',.75); set('param-plants',3); set('param-furniture',1); set('param-wallbow',0.65); set('param-ceilingdome',0.85);
+    setWallColor('#b9c8a6','biophilic sage',document.getElementById('sw-green'));
+  }
+  applyParamControls();
+  logEvent('PRESET', name);
+}
+
+function buildParamSpec(){
+  return {
+    schema: 'cogs160.parametric_scene_spec.v1',
+    timestamp: new Date().toISOString(),
+    sceneParams: {...sceneParams},
+    meshRoles: MESH_ROLES,
+    viability: {
+      geometry: 'ceiling mesh/walls/columns scale continuously 2.0–6.0m; wall bow and ceiling dome each range from -1 concave, 0 square/flat, to +1 convex/domed',
+      lighting: 'CCT and intensity update ambient, downlights, window, spot, fire contribution',
+      materials: 'wall roughness updates material shader values',
+      color: 'wall swatches update all wall role meshes',
+      biophilic_elements: 'plant visibility count 0–3',
+      furniture_layout: 'furniture visibility toggle; chess task table preserved as cognitive apparatus',
+      acoustic_properties: 'ambient audio condition is encoded in export/log for later audio assets',
+      visual_complexity: 'ornament/symmetry/curvature state is encoded; no artificial partition wall is added' 
+    }
+  };
+}
+
+function exportParamSpec(){
+  const b=new Blob([JSON.stringify(buildParamSpec(),null,2)],{type:'application/json'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(b); a.download=`parametric_scene_spec_${Date.now()}.json`; a.click();
+  logEvent('EXPORT_SPEC','Parametric JSON spec exported');
+}
+
+// ════════════════════════════════════════════════════
+//  MULTIPLAYER + AI TEST SETTINGS
+// ════════════════════════════════════════════════════
+function setGameMode(mode){
+  gameMode = mode;
+  document.getElementById('mode-ai').classList.toggle('active', mode==='ai');
+  document.getElementById('mode-human').classList.toggle('active', mode==='human');
+  document.getElementById('s-mode').textContent = mode==='ai' ? 'AI' : '2P';
+  logEvent('GAME_MODE', mode);
+}
+function setAIDifficulty(level){
+  aiDifficulty = level;
+  ['random','easy','standard','hard'].forEach(x=>document.getElementById('ai-'+x).classList.toggle('active', x===level));
+  document.getElementById('s-ai').textContent = level.charAt(0).toUpperCase()+level.slice(1);
+  logEvent('AI_DIFFICULTY', level);
+}
+function serializeState(){ return {board, turn, moveCount, plyCount, capCount, moveLog, currentCeiling, currentLight, gameMode, aiDifficulty, gameStart}; }
+function applyRemoteState(state){
+  if(!state || !state.board) return;
+  isApplyingRemoteState = true;
+  board = state.board; turn = state.turn || 'white'; moveCount = state.moveCount || 0; plyCount = state.plyCount || 0; capCount = state.capCount || 0; moveLog = state.moveLog || moveLog || []; if(state.gameStart) gameStart = state.gameStart;
+  if(state.currentCeiling && state.currentCeiling !== currentCeiling) setCeiling(state.currentCeiling);
+  if(state.currentLight && state.currentLight !== currentLight) setLight(state.currentLight);
+  if(state.gameMode) setGameMode(state.gameMode);
+  if(state.aiDifficulty) setAIDifficulty(state.aiDifficulty);
+  document.getElementById('s-moves').textContent=moveCount; document.getElementById('hud-moves').textContent=moveCount; document.getElementById('s-caps').textContent=capCount; document.getElementById('hud-captures').textContent=capCount;
+  sel=null; setStatus(); drawBoard(); update3DChessPieces(); isApplyingRemoteState = false;
+}
+function broadcastState(reason='state'){
+  if(socket && socket.connected && !isApplyingRemoteState) socket.emit('chess-state', {room:multiplayerRoom, reason, state:serializeState()});
+}
+function joinMultiplayerRoom(){
+  multiplayerRoom = (document.getElementById('room-code').value || 'cogs160-chess').trim(); setGameMode('human');
+  if(typeof io === 'undefined'){
+    document.getElementById('net-status').textContent = 'Socket.IO not loaded. Run with server.js, not plain file/GitHub Pages.';
+    logEvent('MULTIPLAYER','Socket.IO unavailable'); return;
+  }
+  if(!socket){
+    socket = io();
+    socket.on('connect',()=>{ document.getElementById('net-status').textContent = `Connected. Room: ${multiplayerRoom}`; socket.emit('join-room', multiplayerRoom); broadcastState('join'); });
+    socket.on('room-state', applyRemoteState);
+    socket.on('chess-state', payload=>{ if(payload && payload.state) applyRemoteState(payload.state); });
+    socket.on('presence', data=>{ if(data && data.room===multiplayerRoom) document.getElementById('net-status').textContent = `Connected. Room: ${data.room} · Players: ${data.count}`; });
+    socket.on('disconnect',()=>{document.getElementById('net-status').textContent = 'Disconnected from multiplayer server.';});
+  } else { socket.emit('join-room', multiplayerRoom); broadcastState('join'); }
+  document.getElementById('net-status').textContent = `Joining room: ${multiplayerRoom}`; logEvent('MULTIPLAYER', `join ${multiplayerRoom}`);
+}
+
+// ════════════════════════════════════════════════════
+//  CHESS ENGINE
+// ════════════════════════════════════════════════════
+// Unicode chess pieces
+const GLYPH = {K:'♔',Q:'♕',R:'♖',B:'♗',N:'♘',P:'♙',k:'♚',q:'♛',r:'♜',b:'♝',n:'♞',p:'♟'};
+const FILES = ['a','b','c','d','e','f','g','h'];
+
+let board, turn, sel, moveCount, plyCount, capCount, moveLog, gameStart, timerID;
+
+function isW(p){ return p && p===p.toUpperCase(); }
+function isB(p){ return p && p===p.toLowerCase(); }
+function sameColor(a,b){ return (isW(a)&&isW(b))||(isB(a)&&isB(b)); }
+
+function initBoard() {
+  board = [
+    ['r','n','b','q','k','b','n','r'],
+    ['p','p','p','p','p','p','p','p'],
+    [null,null,null,null,null,null,null,null],
+    [null,null,null,null,null,null,null,null],
+    [null,null,null,null,null,null,null,null],
+    [null,null,null,null,null,null,null,null],
+    ['P','P','P','P','P','P','P','P'],
+    ['R','N','B','Q','K','B','N','R'],
+  ];
+  turn='white'; sel=null; moveCount=0; plyCount=0; capCount=0; moveLog=[]; gameStart=Date.now();
+}
+
+function getMoves(r, c) {
+  const p = board[r][c]; if (!p) return [];
+  const moves=[], pt=p.toLowerCase();
+  const slide = (dirs) => {
+    for (const [dr,dc] of dirs) {
+      let nr=r+dr, nc=c+dc;
+      while(nr>=0&&nr<8&&nc>=0&&nc<8){
+        if(!board[nr][nc]){ moves.push([nr,nc]); }
+        else { if(!sameColor(p,board[nr][nc])) moves.push([nr,nc]); break; }
+        nr+=dr; nc+=dc;
+      }
+    }
+  };
+  const jump = (dirs) => {
+    for (const [dr,dc] of dirs){
+      const nr=r+dr,nc=c+dc;
+      if(nr>=0&&nr<8&&nc>=0&&nc<8&&!sameColor(p,board[nr][nc])) moves.push([nr,nc]);
+    }
+  };
+  if(pt==='r') slide([[0,1],[0,-1],[1,0],[-1,0]]);
+  else if(pt==='b') slide([[1,1],[1,-1],[-1,1],[-1,-1]]);
+  else if(pt==='q') slide([[0,1],[0,-1],[1,0],[-1,0],[1,1],[1,-1],[-1,1],[-1,-1]]);
+  else if(pt==='k') jump([[0,1],[0,-1],[1,0],[-1,0],[1,1],[1,-1],[-1,1],[-1,-1]]);
+  else if(pt==='n') jump([[2,1],[2,-1],[-2,1],[-2,-1],[1,2],[1,-2],[-1,2],[-1,-2]]);
+  else if(pt==='p'){
+    const dir=isW(p)?-1:1, start=isW(p)?6:1;
+    if(r+dir>=0&&r+dir<8){
+      if(!board[r+dir][c]) moves.push([r+dir,c]);
+      if(r===start&&!board[r+dir][c]&&!board[r+2*dir][c]) moves.push([r+2*dir,c]);
+      for(const dc of[-1,1]){
+        if(c+dc>=0&&c+dc<8&&board[r+dir][c+dc]&&!sameColor(p,board[r+dir][c+dc]))
+          moves.push([r+dir,c+dc]);
+      }
+    }
+  }
+  return moves;
+}
+
+function drawBoard() {
+  const cv = document.getElementById('chess-board');
+  const ctx = cv.getContext('2d');
+  const S = 60;
+  const legal = sel ? getMoves(sel[0],sel[1]) : [];
+
+  for(let r=0;r<8;r++){
+    for(let c=0;c<8;c++){
+      // Square
+      ctx.fillStyle = (r+c)%2===0 ? '#f0d9b5' : '#b58863';
+      ctx.fillRect(c*S,r*S,S,S);
+      // Selected
+      if(sel&&sel[0]===r&&sel[1]===c){ ctx.fillStyle='rgba(20,85,30,.5)'; ctx.fillRect(c*S,r*S,S,S); }
+      // Legal move indicator
+      if(legal.some(([mr,mc])=>mr===r&&mc===c)){
+        if(board[r][c]){
+          ctx.strokeStyle='rgba(20,120,30,.7)'; ctx.lineWidth=4;
+          ctx.strokeRect(c*S+2,r*S+2,S-4,S-4);
+        } else {
+          ctx.fillStyle='rgba(20,120,30,.38)';
+          ctx.beginPath(); ctx.arc(c*S+S/2,r*S+S/2,11,0,Math.PI*2); ctx.fill();
+        }
+      }
+      // Piece
+      if(board[r][c]){
+        ctx.font=`${S*.78}px serif`;
+        ctx.textAlign='center'; ctx.textBaseline='middle';
+        // Shadow for contrast
+        ctx.fillStyle=isW(board[r][c])?'rgba(0,0,0,.25)':'rgba(255,255,255,.15)';
+        ctx.fillText(GLYPH[board[r][c]],c*S+S/2+1.5,r*S+S/2+2.5);
+        ctx.fillStyle=isW(board[r][c])?'#ffffff':'#1a1a1a';
+        ctx.fillText(GLYPH[board[r][c]],c*S+S/2,r*S+S/2+1);
+        // Outline
+        ctx.strokeStyle=isW(board[r][c])?'#555':'#bbb';
+        ctx.lineWidth=.8;
+        ctx.strokeText(GLYPH[board[r][c]],c*S+S/2,r*S+S/2+1);
+      }
+    }
+  }
+  // Coordinates
+  ctx.font='10px Courier New'; ctx.fillStyle='#888';
+  for(let i=0;i<8;i++){
+    ctx.textAlign='left'; ctx.textBaseline='top';    ctx.fillText(8-i,2,i*S+2);
+    ctx.textAlign='right'; ctx.textBaseline='bottom'; ctx.fillText(FILES[i],(i+1)*S-2,480-2);
+  }
+  update3DChessPieces();
+}
+
+function handleClick(e) {
+  const cv = document.getElementById('chess-board');
+  const rect = cv.getBoundingClientRect();
+  const S = 60;
+  const c = Math.floor((e.clientX-rect.left)/S);
+  const r = Math.floor((e.clientY-rect.top)/S);
+  if(r<0||r>7||c<0||c>7) return;
+  handleSquareSelection(r,c);
+}
+
+function handleSquareSelection(r,c){
+  if(!board) return;
+  if(gameMode==='ai' && turn==='black') return;
+  const piece = board[r][c];
+  const myTurn = turn==='white' ? isW(piece) : isB(piece);
+
+  if(sel){
+    const legal = getMoves(sel[0],sel[1]);
+    if(legal.some(([mr,mc])=>mr===r&&mc===c)){
+      executeMove(sel[0], sel[1], r, c, false);
+      return;
+    }
+    sel = (piece && myTurn) ? [r,c] : null;
+  } else {
+    if(piece && myTurn) sel=[r,c];
+  }
+  drawBoard();
+  refresh3DHighlights();
+}
+
+function executeMove(fr,fc,r,c,isAI=false){
+  const from=`${FILES[fc]}${8-fr}`, to=`${FILES[c]}${8-r}`;
+  const cap = board[r][c];
+  if(cap){ capCount++; document.getElementById('s-caps').textContent=capCount; document.getElementById('hud-captures').textContent=capCount; }
+  let mp = board[fr][fc];
+  if(mp==='P'&&r===0) mp='Q';
+  if(mp==='p'&&r===7) mp='q';
+  board[r][c]=mp; board[fr][fc]=null; sel=null;
+  plyCount++;
+  // Visible counter = participant turns. In AI mode, AI replies do not add to the participant turn count.
+  if(!isAI || gameMode !== 'ai') moveCount++;
+  document.getElementById('s-moves').textContent=moveCount; document.getElementById('hud-moves').textContent=moveCount;
+  moveLog.push({move:`${from}→${to}`,cap:!!cap,ceiling:currentCeiling,light:currentLight,ms:Date.now()-gameStart,turns:moveCount,ply:plyCount,ai:isAI,difficulty:isAI?aiDifficulty:null});
+  logEvent(isAI?'AI_MOVE':'CHESS',`${from}→${to}${cap?'×':''} | ceil:${currentCeiling} light:${currentLight}`);
+  turn = turn==='white'?'black':'white';
+  setStatus(); drawBoard(); refresh3DHighlights();
+  broadcastState(isAI?'ai-move':'move');
+  if(!isAI && gameMode==='ai' && turn==='black') setTimeout(aiMove,420);
+}
+
+
+function updateBottomHUD(){
+  const setText=(id,val)=>{ const el=document.getElementById(id); if(el) el.textContent=val; };
+  setText('hud-moves', moveCount || 0);
+  setText('hud-captures', capCount || 0);
+  const isAITurn = gameMode==='ai' && turn==='black';
+  setText('hud-turn-label', isAITurn ? 'AI Thinking' : (turn==='white' ? 'Your Turn' : 'Black Turn'));
+  setText('hud-status-mini', isAITurn ? `${aiDifficulty.toUpperCase()} AI is choosing a move` : 'Make your move');
+}
+
+function setStatus(){
+  const inCheck = isInCheck(turn);
+  const hasMoves = anyMoves(turn);
+  if(!hasMoves){
+    document.getElementById('chess-status').textContent = inCheck
+      ? `Checkmate! ${turn==='white'?'Black':'White'} wins 🏆`
+      : 'Stalemate — Draw';
+  } else {
+    document.getElementById('chess-status').textContent =
+      `${turn.charAt(0).toUpperCase()+turn.slice(1)} to move${inCheck?' — Check! ⚠':''}`;
+  }
+  updateBottomHUD();
+}
+
+function isInCheck(color){
+  // Find king
+  let kr=-1,kc=-1;
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++){
+    if(color==='white'&&board[r][c]==='K'){kr=r;kc=c;}
+    if(color==='black'&&board[r][c]==='k'){kr=r;kc=c;}
+  }
+  if(kr<0) return false;
+  // Check if any opponent attacks king
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++){
+    const p=board[r][c]; if(!p) continue;
+    if(color==='white'&&!isB(p)) continue;
+    if(color==='black'&&!isW(p)) continue;
+    if(getMoves(r,c).some(([mr,mc])=>mr===kr&&mc===kc)) return true;
+  }
+  return false;
+}
+
+function anyMoves(color){
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++){
+    const p=board[r][c]; if(!p) continue;
+    if(color==='white'&&!isW(p)) continue;
+    if(color==='black'&&!isB(p)) continue;
+    if(getMoves(r,c).length>0) return true;
+  }
+  return false;
+}
+
+function aiMove(){
+  if(gameMode !== 'ai') return;
+  const all=[];
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++) if(board[r][c]&&isB(board[r][c])) for(const [mr,mc] of getMoves(r,c)){
+    const capture = board[mr][mc] ? pieceVal(board[mr][mc]) : 0;
+    const center = 4 - (Math.abs(3.5-mr)+Math.abs(3.5-mc));
+    const develop = (board[r][c].toLowerCase()==='n'||board[r][c].toLowerCase()==='b') && r===0 ? 0.35 : 0;
+    const advance = board[r][c]==='p' ? mr*0.05 : 0;
+    all.push({fr:r,fc:c,tr:mr,tc:mc,val:capture + center*0.08 + develop + advance});
+  }
+  if(!all.length) return;
+  let pool;
+  if(aiDifficulty==='random') pool = all;
+  else { all.sort((a,b)=>b.val-a.val); pool = all.slice(0, Math.min(aiDifficulty==='easy'?10:aiDifficulty==='hard'?2:5, all.length)); }
+  const mv = pool[Math.floor(Math.random()*pool.length)];
+  executeMove(mv.fr, mv.fc, mv.tr, mv.tc, true);
+}
+
+function pieceVal(p){
+  const v={p:1,n:3,b:3,r:5,q:9,k:100};
+  return v[p.toLowerCase()]||0;
+}
+
+function formatGameTime(){
+  if(!gameStart) gameStart = Date.now();
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - gameStart) / 1000));
+  const minutes = Math.floor(elapsedSeconds / 60);
+  const seconds = String(elapsedSeconds % 60).padStart(2, '0');
+  return `${minutes}:${seconds}`;
+}
+
+function updateGameTimer(){
+  const tstr=formatGameTime();
+  const overlayTimer=document.getElementById('s-time');
+  const hudTimer=document.getElementById('hud-time');
+  if(overlayTimer) overlayTimer.textContent=tstr;
+  if(hudTimer) hudTimer.textContent=tstr;
+}
+
+function startGameTimer(reset=false){
+  if(reset || !gameStart) gameStart = Date.now();
+  if(timerID) clearInterval(timerID);
+  updateGameTimer();
+  timerID = setInterval(updateGameTimer, 1000);
+}
+
+function resetChess(){
+  initBoard(); sel=null;
+  document.getElementById('s-moves').textContent='0';
+  document.getElementById('hud-moves').textContent='0';
+  document.getElementById('s-caps').textContent='0';
+  document.getElementById('hud-captures').textContent='0';
+  startGameTimer(true);
+  setStatus(); drawBoard(); update3DChessPieces();
+  logEvent('CHESS_RESET',`ceil:${currentCeiling} light:${currentLight}`);
+  broadcastState('reset');
+}
+
+// ════════════════════════════════════════════════════
+//  OPEN / CLOSE CHESS
+// ════════════════════════════════════════════════════
+function openChess(){
+  document.getElementById('chess-overlay').classList.add('open');
+  document.getElementById('play-btn').style.display='none';
+  document.getElementById('prompt').style.display='none';
+  document.getElementById('ceil-label').textContent=CEILINGS[currentCeiling].label;
+  document.getElementById('light-label').textContent=LIGHTS[currentLight].label;
+  document.getElementById('s-ceil').textContent=currentCeiling.charAt(0).toUpperCase()+currentCeiling.slice(1);
+  document.getElementById('s-light').textContent=LIGHTS[currentLight].label;
+  drawBoard();
+  startGameTimer(false);
+  logEvent('CHESS_OPEN',`ceil:${currentCeiling} light:${currentLight}`);
+}
+
+function closeChess(){
+  document.getElementById('chess-overlay').classList.remove('open');
+  logEvent('CHESS_CLOSE',`moves:${moveCount} caps:${capCount} ceil:${currentCeiling}`);
+}
+
+document.getElementById('chess-board').addEventListener('click', handleClick);
+
+// ════════════════════════════════════════════════════
+//  LOGGING
+// ════════════════════════════════════════════════════
+function logEvent(type, detail){
+  const ts=new Date().toISOString().substr(11,8);
+  logEntries.push({ts:Date.now(),type,detail,ceiling:currentCeiling,light:currentLight});
+  const el=document.createElement('div'); el.className='le';
+  el.innerHTML=`<span>${ts}</span> <b>[${type}]</b> ${detail}`;
+  const c=document.getElementById('log-entries'); c.prepend(el);
+  if(c.children.length>35) c.lastChild.remove();
+}
+
+
+function toggleLog(){
+  const log = document.getElementById('log');
+  const btn = document.getElementById('log-min-btn');
+  log.classList.toggle('collapsed');
+  btn.textContent = log.classList.contains('collapsed') ? '+' : '−';
+}
+function clearLogUI(){
+  const c = document.getElementById('log-entries');
+  if(c) c.innerHTML = '';
+}
+
+window.exportLog=()=>{
+  const data={session:{start:new Date().toISOString()},condition:buildParamSpec(),moves:moveLog,events:logEntries};
+  const b=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(b);
+  a.download=`cogs160_${Date.now()}.json`;a.click();
+};
+
+
+function toggleRightPanel(force){
+  const panel = document.getElementById('panels');
+  const btn = document.getElementById('panel-toggle');
+  if(!panel || !btn) return;
+  const closed = typeof force === 'boolean' ? force : !panel.classList.contains('closed');
+  panel.classList.toggle('closed', closed);
+  btn.classList.toggle('closed', closed);
+  btn.textContent = closed ? 'Show Controls' : 'Hide Controls';
+}
+function toggleTask2Panel(force){
+  const panel = document.getElementById('param-controls-panel');
+  const btn = document.getElementById('task2-min-btn');
+  if(!panel || !btn) return;
+  const closed = typeof force === 'boolean' ? force : !panel.classList.contains('collapsed');
+  panel.classList.toggle('collapsed', closed);
+  btn.textContent = closed ? '+' : '−';
+}
+
+// ════════════════════════════════════════════════════
+//  PROXIMITY + SCENE INIT
+// ════════════════════════════════════════════════════
+let nearTable=false, elapsed=0; window.nearTable=false;
+
+document.getElementById('scene').addEventListener('loaded',()=>{
+  initBoard();
+  startGameTimer(true);
+  create3DChessSet();
+  drawBoard();
+  setStatus();
+  applyParamControls();
+  logEvent('SCENE_LOAD','Room ready — Task 2 param system + bidirectional wall/ceiling curvature enabled');
+
+  setInterval(()=>{
+    try{
+      const p=document.getElementById('rig').object3D.position;
+      const dist=Math.sqrt(p.x*p.x+(p.z+1)*(p.z+1));
+      const near=dist<2.5;
+      if(near!==nearTable){
+        nearTable=near; window.nearTable=near;
+        document.getElementById('play-btn').style.display=near?'block':'none';
+        document.getElementById('prompt').style.display=near?'block':'none';
+        if(near) logEvent('PROXIMITY','Near chess table');
+      }
+    }catch(e){}
+  },300);
+
+  setInterval(()=>{ elapsed+=5; if(elapsed%30===0) logEvent('DWELL',`${elapsed}s ceil:${currentCeiling} light:${currentLight}`); },5000);
+});
+
+document.addEventListener('keydown',e=>{
+  if((e.key==='e'||e.key==='E')&&nearTable&&!document.getElementById('chess-overlay').classList.contains('open')) openChess();
+  if(e.key==='Escape') closeChess();
+  if(e.key==='c'||e.key==='C') toggleRightPanel();
+  if(e.key==='p'||e.key==='P') toggleTask2Panel();
+});
+</script>
+</body>
+</html>

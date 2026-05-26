@@ -1,0 +1,1415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Knowledge Atlas · VR Viewer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <!-- A-Frame -->
+  <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+
+  <!-- ─── STYLES ─────────────────────────────────────────────────────── -->
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body { display: flex; height: 100vh; font-family: system-ui, sans-serif;
+           background: #111; color: #eee; overflow: hidden; }
+
+    /* ── Side Panel ── */
+    #panel {
+      width: 320px; min-width: 320px; height: 100vh;
+      background: #1a1a2e; overflow-y: auto; padding: 12px;
+      display: flex; flex-direction: column; gap: 10px;
+      z-index: 10; border-right: 1px solid #333;
+    }
+    #panel h1 { font-size: 14px; color: #7eb8f7; letter-spacing: 1px;
+                text-transform: uppercase; padding-bottom: 6px;
+                border-bottom: 1px solid #333; }
+
+    .section { background: #16213e; border-radius: 8px; padding: 10px; }
+    .section h2 { font-size: 11px; color: #a0c4ff; text-transform: uppercase;
+                  letter-spacing: 1px; margin-bottom: 8px; }
+
+    /* model selector */
+    #modelSelect { width: 100%; padding: 6px; border-radius: 6px;
+                   background: #0f3460; color: #eee; border: 1px solid #444;
+                   font-size: 13px; }
+
+    /* sliders */
+    .ctrl { display: flex; flex-direction: column; gap: 3px; margin-bottom: 6px; }
+    .ctrl label { font-size: 11px; color: #aaa; display: flex;
+                  justify-content: space-between; }
+    .ctrl label span { color: #7eb8f7; font-weight: bold; }
+    input[type=range] { width: 100%; accent-color: #7eb8f7; cursor: pointer; }
+
+    /* swatches */
+    .swatches { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+    .swatch {
+      width: 32px; height: 32px; border-radius: 6px; cursor: pointer;
+      border: 2px solid transparent; transition: border-color .15s;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 9px; color: #fff; text-shadow: 0 0 3px #000;
+    }
+    .swatch.active { border-color: #7eb8f7; }
+    .swatch-label { font-size: 10px; color: #aaa; width: 100%; }
+
+    /* wall selector */
+    .wall-btns { display: flex; flex-wrap: wrap; gap: 5px; }
+    .wall-btn {
+      padding: 4px 10px; border-radius: 5px; font-size: 11px;
+      border: 1px solid #444; background: #0f3460; color: #eee;
+      cursor: pointer; transition: background .15s;
+    }
+    .wall-btn.active { background: #7eb8f7; color: #000; font-weight: bold; }
+
+    /* audio */
+    .audio-btns { display: flex; flex-wrap: wrap; gap: 5px; }
+    .audio-btn {
+      padding: 4px 8px; border-radius: 5px; font-size: 11px;
+      border: 1px solid #444; background: #0f3460; color: #eee;
+      cursor: pointer;
+    }
+    .audio-btn.active { background: #7eb8f7; color: #000; }
+
+    /* presets */
+    .preset-btn {
+      width: 100%; padding: 7px; border-radius: 6px; margin-bottom: 5px;
+      background: #0f3460; color: #eee; border: 1px solid #444;
+      font-size: 11px; cursor: pointer; text-align: left;
+      transition: background .15s;
+    }
+    .preset-btn:hover { background: #1a4a8a; }
+
+    /* NL input */
+    #nlInput {
+      width: 100%; padding: 8px; border-radius: 6px; resize: none;
+      background: #0f3460; color: #eee; border: 1px solid #444;
+      font-size: 12px; height: 70px;
+    }
+    #nlBtn, #resetBtn, #exportBtn {
+      width: 100%; padding: 8px; border-radius: 6px; border: none;
+      font-size: 13px; cursor: pointer; font-weight: bold; margin-top: 4px;
+    }
+    #nlBtn    { background: #7eb8f7; color: #000; }
+    #resetBtn { background: #e76f51; color: #fff; }
+    #exportBtn{ background: #2a9d8f; color: #fff; }
+
+    /* validation log */
+    #valLog {
+      font-size: 10px; color: #ccc; background: #0a0a1a; border-radius: 6px;
+      padding: 8px; max-height: 120px; overflow-y: auto; line-height: 1.6;
+    }
+    .log-ok   { color: #6fcf97; }
+    .log-warn { color: #f2c94c; }
+    .log-err  { color: #eb5757; }
+
+    /* FPS */
+    #fps { font-size: 11px; color: #aaa; text-align: right; }
+
+    /* viewport */
+    #viewport { flex: 1; position: relative; }
+    a-scene   { width: 100% !important; height: 100% !important; }
+
+    /* history */
+    #histLog {
+      font-size: 10px; color: #aaa; background: #0a0a1a; border-radius: 6px;
+      padding: 8px; max-height: 80px; overflow-y: auto;
+    }
+  </style>
+</head>
+<body>
+
+<!-- ════════════════════════════════════════════════════════════════════
+     SIDE PANEL
+═══════════════════════════════════════════════════════════════════════ -->
+<div id="panel">
+  <h1>🏛 Knowledge Atlas · VR Studio</h1>
+
+  <!-- FPS -->
+  <div id="fps">FPS: —</div>
+
+  <!-- Model selector -->
+  <div class="section">
+    <h2>Model</h2>
+    <select id="modelSelect">
+      <option value="">— select a model —</option>
+      <!-- Populated from CATALOG -->
+    </select>
+  </div>
+
+  <!-- ── 1. GEOMETRY ── -->
+  <div class="section">
+    <h2>① Geometry</h2>
+    <div class="ctrl">
+      <label>Ceiling height (m) <span id="vCeilH">3.0</span></label>
+      <input type="range" id="sCeilH" min="2" max="6" step="0.1" value="3">
+    </div>
+    <div class="ctrl">
+      <label>Room width (m) <span id="vRoomW">6.0</span></label>
+      <input type="range" id="sRoomW" min="3" max="12" step="0.1" value="6">
+    </div>
+    <div class="ctrl">
+      <label>Room depth (m) <span id="vRoomD">5.0</span></label>
+      <input type="range" id="sRoomD" min="3" max="12" step="0.1" value="5">
+    </div>
+    <div class="ctrl">
+      <label>Partition depth (m) <span id="vPartD">0.0</span></label>
+      <input type="range" id="sPartD" min="0" max="2.5" step="0.1" value="0">
+    </div>
+    <div class="ctrl">
+      <label>Window scale <span id="vWinSc">1.0</span>×</label>
+      <input type="range" id="sWinSc" min="0.2" max="3" step="0.05" value="1">
+    </div>
+  </div>
+
+  <!-- ── 2. LIGHTING ── -->
+  <div class="section">
+    <h2>② Lighting</h2>
+    <div class="ctrl">
+      <label>Intensity <span id="vLightI">1.0</span></label>
+      <input type="range" id="sLightI" min="0.1" max="3" step="0.05" value="1">
+    </div>
+    <div class="ctrl">
+      <label>CCT (K) <span id="vCCT">4000</span>K</label>
+      <input type="range" id="sCCT" min="2700" max="6500" step="50" value="4000">
+    </div>
+    <div class="ctrl">
+      <label>Daylight mix <span id="vDaylight">0</span>%</label>
+      <input type="range" id="sDaylight" min="0" max="100" step="1" value="0">
+    </div>
+  </div>
+
+  <!-- ── 3 & 4. MATERIALS + COLOR ── -->
+  <div class="section">
+    <h2>③ Materials &amp; ④ Color</h2>
+
+    <!-- Wall target selector -->
+    <p class="swatch-label">Target wall:</p>
+    <div class="wall-btns" id="wallSelector">
+      <button class="wall-btn active" data-wall="all">All</button>
+      <button class="wall-btn" data-wall="north">N</button>
+      <button class="wall-btn" data-wall="south">S</button>
+      <button class="wall-btn" data-wall="east">E</button>
+      <button class="wall-btn" data-wall="west">W</button>
+    </div>
+
+    <!-- Wall material swatches -->
+    <p class="swatch-label" style="margin-top:8px">Wall material:</p>
+    <div class="swatches" id="wallMats"></div>
+
+    <!-- Floor material -->
+    <p class="swatch-label" style="margin-top:8px">Floor material:</p>
+    <div class="swatches" id="floorMats"></div>
+
+    <!-- Ceiling material -->
+    <p class="swatch-label" style="margin-top:8px">Ceiling material:</p>
+    <div class="swatches" id="ceilMats"></div>
+
+    <!-- Roughness -->
+    <div class="ctrl" style="margin-top:8px">
+      <label>Wall roughness <span id="vRough">0.7</span></label>
+      <input type="range" id="sRough" min="0" max="1" step="0.01" value="0.7">
+    </div>
+  </div>
+
+  <!-- ── 5. BIOPHILIC ── -->
+  <div class="section">
+    <h2>⑤ Biophilic Elements</h2>
+    <div class="ctrl">
+      <label>Plant count <span id="vPlants">3</span></label>
+      <input type="range" id="sPlants" min="0" max="12" step="1" value="3">
+    </div>
+    <div class="ctrl">
+      <label>Nature view <span id="vNature">0</span>%</label>
+      <input type="range" id="sNature" min="0" max="100" step="1" value="0">
+    </div>
+    <div class="ctrl">
+      <label>Water feature
+        <input type="checkbox" id="cbWater"> On
+      </label>
+    </div>
+  </div>
+
+  <!-- ── 6. FURNITURE ── -->
+  <div class="section">
+    <h2>⑥ Furniture Layout</h2>
+    <div class="ctrl">
+      <label>Furniture density <span id="vFurnD">50</span>%</label>
+      <input type="range" id="sFurnD" min="0" max="100" step="1" value="50">
+    </div>
+    <div class="ctrl">
+      <label>Arrangement
+        <select id="selArrange" style="background:#0f3460;color:#eee;border:1px solid #444;border-radius:4px;padding:2px 6px">
+          <option value="sociopetal">Sociopetal</option>
+          <option value="sociofugal">Sociofugal</option>
+          <option value="classroom">Classroom</option>
+        </select>
+      </label>
+    </div>
+  </div>
+
+  <!-- ── 7. ACOUSTIC ── -->
+  <div class="section">
+    <h2>⑦ Acoustic Properties</h2>
+    <div class="ctrl">
+      <label>Ambient level <span id="vAmbient">30</span>dB</label>
+      <input type="range" id="sAmbient" min="0" max="80" step="1" value="30">
+    </div>
+    <div class="audio-btns" id="audioSelector">
+      <button class="audio-btn active" data-loop="silence">Silence</button>
+      <button class="audio-btn" data-loop="nature">Nature</button>
+      <button class="audio-btn" data-loop="office">Office</button>
+      <button class="audio-btn" data-loop="cafe">Café</button>
+      <button class="audio-btn" data-loop="rain">Rain</button>
+    </div>
+  </div>
+
+  <!-- ── 8. VISUAL COMPLEXITY ── -->
+  <div class="section">
+    <h2>⑧ Visual Complexity</h2>
+    <div class="ctrl">
+      <label>Fractal / ornament <span id="vComplexity">0</span></label>
+      <input type="range" id="sComplexity" min="0" max="5" step="0.1" value="0">
+    </div>
+    <div class="ctrl">
+      <label>Symmetry axis
+        <select id="selSymmetry" style="background:#0f3460;color:#eee;border:1px solid #444;border-radius:4px;padding:2px 6px">
+          <option value="none">None</option>
+          <option value="bilateral">Bilateral</option>
+          <option value="radial">Radial</option>
+        </select>
+      </label>
+    </div>
+  </div>
+
+  <!-- ── RESEARCH PRESETS ── -->
+  <div class="section">
+    <h2>Research Presets</h2>
+    <button class="preset-btn" data-preset="meyers-high">
+      Meyers-Levy High Ceiling
+    </button>
+    <button class="preset-btn" data-preset="meyers-low">
+      Meyers-Levy Low Ceiling
+    </button>
+    <button class="preset-btn" data-preset="biophilic">
+      Biophilic Restoration
+    </button>
+    <button class="preset-btn" data-preset="prospect">
+      Prospect-Dominant
+    </button>
+    <button class="preset-btn" data-preset="refuge">
+      Refuge-Dominant
+    </button>
+    <button class="preset-btn" data-preset="clinical">
+      Clinical Control
+    </button>
+  </div>
+
+  <!-- ── AI FRONT-END ── -->
+  <div class="section">
+    <h2>AI Natural Language</h2>
+    <textarea id="nlInput"
+      placeholder='e.g. "cozy library with 4m ceilings, brick north wall, dim warm lighting"'></textarea>
+    <button id="nlBtn">▶ Apply with AI</button>
+    <div id="valLog">Validation log will appear here…</div>
+  </div>
+
+  <!-- ── MODIFICATION HISTORY ── -->
+  <div class="section">
+    <h2>Modification History</h2>
+    <div id="histLog">No modifications yet.</div>
+  </div>
+
+  <!-- ── ACTIONS ── -->
+  <div class="section">
+    <button id="resetBtn">↺ Reset to Defaults</button>
+    <button id="exportBtn">⬇ Export modified glTF</button>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════════
+     A-FRAME VIEWPORT
+═══════════════════════════════════════════════════════════════════════ -->
+<div id="viewport">
+<a-scene
+  id="scene"
+  renderer="antialias:true; colorManagement:true; physicallyCorrectLights:true"
+  background="color:#1a1a2e"
+  vr-mode-ui="enabled:true"
+  loading-screen="dotsColor:#7eb8f7; backgroundColor:#1a1a2e">
+
+  <a-assets>
+    <!-- HDRI (Poly Haven – indoor warm, CC0) -->
+    <img id="hdri"
+      src="https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/studio_small_08_1k.hdr"
+      crossorigin="anonymous">
+  </a-assets>
+
+  <!-- Environment / HDRI -->
+  <a-entity id="envMap"
+    environment="preset:default; skyType:color; skyColor:#1a1a2e;
+                 lighting:none; fog:0; playArea:1">
+  </a-entity>
+
+  <!-- Ambient + directional lights (swapped at runtime) -->
+  <a-light id="ambLight" type="ambient"  color="#fff" intensity="0.4"></a-light>
+  <a-light id="sunLight" type="directional"
+           position="2 4 1" color="#fff" intensity="0.8"
+           shadow="cast:true; bias:-0.001"></a-light>
+  <a-light id="fillLight" type="point"
+           position="0 2.5 0" color="#fff" intensity="0.6"></a-light>
+
+  <!-- ── ROOM SHELL (built from primitives = no seam issues) ── -->
+  <a-entity id="room">
+
+    <!-- Floor -->
+    <a-plane id="floor"
+      rotation="-90 0 0"
+      width="6" height="5"
+      position="0 0 0"
+      material="color:#c8a97e; roughness:0.8; metalness:0"
+      shadow="receive:true">
+    </a-plane>
+
+    <!-- Ceiling -->
+    <a-plane id="ceiling"
+      rotation="90 0 0"
+      width="6" height="5"
+      position="0 3 0"
+      material="color:#f0ece4; roughness:0.9; metalness:0"
+      shadow="receive:true">
+    </a-plane>
+
+    <!-- Walls -->
+    <a-plane id="wallNorth"
+      position="0 1.5 -2.5"
+      width="6" height="3"
+      material="color:#e8e0d5; roughness:0.7; metalness:0"
+      shadow="receive:true">
+    </a-plane>
+
+    <a-plane id="wallSouth"
+      rotation="0 180 0"
+      position="0 1.5 2.5"
+      width="6" height="3"
+      material="color:#e8e0d5; roughness:0.7; metalness:0"
+      shadow="receive:true">
+    </a-plane>
+
+    <a-plane id="wallEast"
+      rotation="0 -90 0"
+      position="3 1.5 0"
+      width="5" height="3"
+      material="color:#e8e0d5; roughness:0.7; metalness:0"
+      shadow="receive:true">
+    </a-plane>
+
+    <a-plane id="wallWest"
+      rotation="0 90 0"
+      position="-3 1.5 0"
+      width="5" height="3"
+      material="color:#e8e0d5; roughness:0.7; metalness:0"
+      shadow="receive:true">
+    </a-plane>
+
+    <!-- Window (on north wall) -->
+    <a-plane id="window"
+      position="0 1.8 -2.49"
+      width="1.2" height="1.0"
+      material="color:#a8d8f0; opacity:0.6; transparent:true;
+                roughness:0.05; metalness:0.1">
+    </a-plane>
+
+    <!-- Window view backdrop (emissive texture swap) -->
+    <a-plane id="windowView"
+      position="0 1.8 -2.7"
+      width="1.3" height="1.1"
+      material="color:#87ceeb; emissive:#2a6fa8; emissiveIntensity:0.3">
+    </a-plane>
+
+    <!-- Partition wall (refuge feature) -->
+    <a-box id="partition"
+      position="1 1.5 0"
+      width="0.1" height="3" depth="2"
+      visible="false"
+      material="color:#d4c5b0; roughness:0.8">
+    </a-box>
+
+    <!-- Water feature -->
+    <a-box id="waterFeature"
+      position="-2 0.3 -1"
+      width="0.8" height="0.4" depth="0.8"
+      visible="false"
+      material="color:#4fc3f7; opacity:0.8; transparent:true;
+                roughness:0.05; metalness:0.3">
+    </a-box>
+
+    <!-- Plant group (spawned at runtime) -->
+    <a-entity id="plantGroup"></a-entity>
+
+    <!-- Furniture group -->
+    <a-entity id="furnitureGroup">
+      <!-- default furniture set -->
+      <a-box class="furniture" position="-1 0.4 1"
+        width="1.2" height="0.8" depth="0.6"
+        material="color:#8b6914; roughness:0.6">
+      </a-box>
+      <a-cylinder class="furniture" position="0 0.45 0.5"
+        radius="0.3" height="0.9"
+        material="color:#5d4037; roughness:0.7">
+      </a-cylinder>
+      <a-box class="furniture" position="1.5 0.35 1.2"
+        width="0.8" height="0.7" depth="0.8"
+        material="color:#78909c; roughness:0.5">
+      </a-box>
+      <a-box class="furniture" position="0.5 0.35 -0.5"
+        width="1.4" height="0.7" depth="0.7"
+        material="color:#6d4c41; roughness:0.6">
+      </a-box>
+    </a-entity>
+
+    <!-- Loaded GLB (optional, hidden until loaded) -->
+    <a-entity id="gltfModel" visible="false"
+      position="0 0 0" scale="1 1 1">
+    </a-entity>
+  </a-entity>
+
+  <!-- Player / camera rig -->
+  <a-entity id="player" position="0 1.7 2">
+    <a-camera
+      look-controls="pointerLockEnabled:false"
+      wasd-controls="acceleration:20"
+      near="0.1" far="100">
+      <a-cursor
+        color="#7eb8f7"
+        raycaster="objects:.clickable">
+      </a-cursor>
+    </a-camera>
+  </a-entity>
+
+</a-scene>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════════
+     JAVASCRIPT
+═══════════════════════════════════════════════════════════════════════ -->
+<script>
+'use strict';
+
+/* ══════════════════════════════════════════════════════════════════
+   GEMINI API KEY — paste yours here (from aistudio.google.com)
+══════════════════════════════════════════════════════════════════ */
+const GEMINI_API_KEY = 'YOUR_GEMINI_API_KEY_HERE';
+
+/* ══════════════════════════════════════════════════════════════════
+   MODEL CATALOG  (add your 20+ models here)
+   viability: { geometry, lighting, materials, color,
+                biophilic, furniture, acoustic, complexity }
+══════════════════════════════════════════════════════════════════ */
+const CATALOG = [
+  {
+    id: 'builtin_room',
+    label: 'Built-in Parametric Room',
+    glb: null,   // null = use primitive shell
+    meshRoles: null,
+    room_dimensions: { width_m: 6, depth_m: 5, height_m: 3 },
+    viability: {
+      geometry:'✓', lighting:'✓', materials:'✓', color:'✓',
+      biophilic:'✓', furniture:'✓', acoustic:'✓', complexity:'✓'
+    }
+  }
+  // Add more entries:
+  // { id:'SKF_office_001', label:'Sketchfab Office',
+  //   glb:'models/SKF_office_001.glb',
+  //   meshRoles:'mesh_roles/SKF_office_001.json', ... }
+];
+
+/* ══════════════════════════════════════════════════════════════════
+   MATERIAL LIBRARY  (PBR presets)
+══════════════════════════════════════════════════════════════════ */
+const WALL_MATS = [
+  { name:'Plaster',  color:'#f0ece4', roughness:0.85, metalness:0 },
+  { name:'Brick',    color:'#8b4513', roughness:0.95, metalness:0 },
+  { name:'Concrete', color:'#9e9e9e', roughness:0.90, metalness:0 },
+  { name:'Wood',     color:'#c8a97e', roughness:0.70, metalness:0 },
+  { name:'White',    color:'#ffffff', roughness:0.80, metalness:0 },
+  { name:'Glass',    color:'#a8d8f0', roughness:0.05, metalness:0.1 },
+  { name:'Slate',    color:'#546e7a', roughness:0.92, metalness:0 },
+  { name:'Stone',    color:'#808080', roughness:0.85, metalness:0 },
+  { name:'Marble',   color:'#f5f5dc', roughness:0.15, metalness:0 },
+  { name:'Metal',    color:'#b0bec5', roughness:0.30, metalness:0.9 },
+];
+const FLOOR_MATS = [
+  { name:'Hardwood', color:'#8b5e3c', roughness:0.60, metalness:0 },
+  { name:'Carpet',   color:'#78909c', roughness:0.95, metalness:0 },
+  { name:'Tile',     color:'#e0e0e0', roughness:0.40, metalness:0 },
+  { name:'Polished', color:'#f5f5dc', roughness:0.15, metalness:0.1 },
+  { name:'Concrete', color:'#9e9e9e', roughness:0.90, metalness:0 },
+  { name:'Marble',   color:'#f5f5dc', roughness:0.10, metalness:0 },
+];
+const CEIL_MATS = [
+  { name:'White',    color:'#f0ece4', roughness:0.90, metalness:0 },
+  { name:'Wood',     color:'#c8a97e', roughness:0.70, metalness:0 },
+  { name:'Concrete', color:'#9e9e9e', roughness:0.90, metalness:0 },
+  { name:'Glass',    color:'#a8d8f0', roughness:0.05, metalness:0.1 },
+];
+
+/* ══════════════════════════════════════════════════════════════════
+   RESEARCH PRESETS  (Meyers-Levy, Browning, Appleton, etc.)
+══════════════════════════════════════════════════════════════════ */
+const PRESETS = {
+  'meyers-high': {
+    label: 'Meyers-Levy High Ceiling (2007)',
+    note:  'Meyers-Levy & Zhu 2007 — ceiling height × creativity',
+    mods:  { ceiling_height:3.5, wall_all_color:'#ffffff',
+             wall_all_roughness:0.8, light_cct:5000, light_intensity:1.2 }
+  },
+  'meyers-low': {
+    label: 'Meyers-Levy Low Ceiling (2007)',
+    note:  'Meyers-Levy & Zhu 2007 — low condition',
+    mods:  { ceiling_height:2.4, wall_all_color:'#ffffff',
+             wall_all_roughness:0.8, light_cct:5000, light_intensity:1.2 }
+  },
+  'biophilic': {
+    label: 'Biophilic Restoration (Browning 2014)',
+    note:  'Browning et al. 2014 — nature exposure + restoration',
+    mods:  { wall_north_color:'#4caf50', wall_north_roughness:0.8,
+             window_scale:2.5, floor_color:'#8b5e3c', floor_roughness:0.6,
+             plant_count:8, nature_view:70 }
+  },
+  'prospect': {
+    label: 'Prospect-Dominant (Appleton 1975)',
+    note:  'Appleton 1975 — prospect-refuge theory',
+    mods:  { ceiling_height:4.0, window_scale:3.0, partition_depth:0,
+             light_intensity:1.5, light_cct:5500 }
+  },
+  'refuge': {
+    label: 'Refuge-Dominant (Appleton 1975)',
+    note:  'Appleton 1975 — refuge condition',
+    mods:  { ceiling_height:2.4, window_scale:0.4, partition_depth:2.0,
+             light_intensity:0.6, light_cct:2700 }
+  },
+  'clinical': {
+    label: 'Clinical Control Lab',
+    note:  'Standard controlled lab environment',
+    mods:  { ceiling_height:2.7, wall_all_color:'#ffffff',
+             wall_all_roughness:0.8, light_cct:6500, light_intensity:1.8,
+             floor_color:'#e0e0e0', floor_roughness:0.4,
+             plant_count:0, furniture_visible:true }
+  }
+};
+
+/* ══════════════════════════════════════════════════════════════════
+   LLM SYSTEM PROMPT
+══════════════════════════════════════════════════════════════════ */
+const SYSTEM_PROMPT = `
+You are a 3D scene modification assistant for architectural neuroarchitecture research.
+
+Given a scene description and a user instruction, output ONLY a JSON object
+with the modifications to apply. Available fields:
+
+GEOMETRY:
+- ceiling_height: number (meters, range 2.0–6.0)
+- room_width: number (meters, 3–12)
+- room_depth: number (meters, 3–12)
+- partition_depth: number (0–2.5, 0 = no partition)
+- window_scale: number (0.2–3.0, 1.0 = current)
+
+LIGHTING:
+- light_intensity: number (0.1–3.0)
+- light_cct: number (2700–6500, Kelvin)
+- daylight_mix: number (0–100, percent)
+
+WALLS (per-wall or all):
+- wall_all_color: hex   - wall_all_roughness: 0–1
+- wall_north_color: hex - wall_north_roughness: 0–1
+- wall_south_color: hex - wall_south_roughness: 0–1
+- wall_east_color: hex  - wall_east_roughness: 0–1
+- wall_west_color: hex  - wall_west_roughness: 0–1
+
+FLOOR:
+- floor_color: hex      - floor_roughness: 0–1
+
+CEILING:
+- ceiling_color: hex    - ceiling_roughness: 0–1
+
+BIOPHILIC:
+- plant_count: integer (0–12)
+- nature_view: number (0–100)
+- water_feature: boolean
+
+FURNITURE:
+- furniture_visible: boolean
+- furniture_density: number (0–100)
+
+ACOUSTIC:
+- ambient_level: number (0–80 dB)
+- audio_loop: "silence"|"nature"|"office"|"cafe"|"rain"
+
+VISUAL COMPLEXITY:
+- complexity: number (0–5)
+- symmetry: "none"|"bilateral"|"radial"
+
+Rules:
+- Only include fields the user instruction changes.
+- If user says "north wall" or "back wall", use wall_north_* fields.
+- If user says "walls" without specifying, use wall_all_* fields.
+- Map colour words to hex: warm=≈#d4a574, cool=≈#a8c8e8, brick=≈#8b4513, etc.
+- Output ONLY valid JSON, no explanation, no markdown.
+`.trim();
+
+/* ══════════════════════════════════════════════════════════════════
+   STATE
+══════════════════════════════════════════════════════════════════ */
+let activeWall    = 'all';
+let currentModel  = CATALOG[0];
+let meshRoles     = null;
+let modHistory    = [];
+let defaultState  = {};
+let plantMeshes   = [];
+
+/* ══════════════════════════════════════════════════════════════════
+   HELPERS
+══════════════════════════════════════════════════════════════════ */
+function mesh(id) { return document.getElementById(id); }
+
+function setMat(el, color, roughness, metalness) {
+  if (!el) return;
+  el.setAttribute('material', {
+    color: color,
+    roughness: roughness !== undefined ? roughness : 0.7,
+    metalness: metalness !== undefined ? metalness : 0
+  });
+}
+
+function log(msg, type = 'ok') {
+  const d = mesh('valLog');
+  const line = document.createElement('div');
+  line.className = `log-${type}`;
+  line.textContent = (type==='ok' ? '✓ ' : type==='warn' ? '⚠ ' : '✗ ') + msg;
+  d.appendChild(line);
+  d.scrollTop = d.scrollHeight;
+}
+
+function addHistory(text, json) {
+  modHistory.push({ text, json, ts: new Date().toISOString() });
+  const d = mesh('histLog');
+  const line = document.createElement('div');
+  line.textContent = `[${modHistory.length}] ${text.slice(0,60)}…`;
+  d.insertBefore(line, d.firstChild);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   SAVE DEFAULT STATE
+══════════════════════════════════════════════════════════════════ */
+function saveDefaults() {
+  defaultState = {
+    ceilH:   parseFloat(mesh('sCeilH').value),
+    roomW:   parseFloat(mesh('sRoomW').value),
+    roomD:   parseFloat(mesh('sRoomD').value),
+    partD:   parseFloat(mesh('sPartD').value),
+    winSc:   parseFloat(mesh('sWinSc').value),
+    lightI:  parseFloat(mesh('sLightI').value),
+    cct:     parseFloat(mesh('sCCT').value),
+    daylight:parseFloat(mesh('sDaylight').value),
+    rough:   parseFloat(mesh('sRough').value),
+    plants:  parseFloat(mesh('sPlants').value),
+    nature:  parseFloat(mesh('sNature').value),
+    water:   false,
+    furnD:   parseFloat(mesh('sFurnD').value),
+    ambient: parseFloat(mesh('sAmbient').value),
+    complexity: parseFloat(mesh('sComplexity').value),
+  };
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   GEOMETRY UPDATES
+══════════════════════════════════════════════════════════════════ */
+function setCeilingHeight(h) {
+  const ceil = mesh('ceiling');
+  const orig = currentModel.room_dimensions
+             ? currentModel.room_dimensions.height_m : 3;
+
+  // Move ceiling plane
+  ceil.setAttribute('position', `0 ${h} 0`);
+
+  // Scale all walls vertically
+  ['wallNorth','wallSouth','wallEast','wallWest'].forEach(id => {
+    const w = mesh(id);
+    if (!w) return;
+    const pos = w.getAttribute('position');
+    w.setAttribute('height', h);
+    w.setAttribute('position', `${pos.x} ${h/2} ${pos.z}`);
+  });
+
+  // Move ceiling light
+  const fill = mesh('fillLight');
+  if (fill) fill.setAttribute('position', `0 ${h - 0.4} 0`);
+
+  mesh('vCeilH').textContent = h.toFixed(1);
+  mesh('sCeilH').value = h;
+
+  // Snap partition
+  const part = mesh('partition');
+  if (part) part.setAttribute('height', h);
+}
+
+function setRoomSize(w, d) {
+  const floor = mesh('floor');
+  const ceil  = mesh('ceiling');
+  floor.setAttribute('width', w);  floor.setAttribute('height', d);
+  ceil.setAttribute('width', w);   ceil.setAttribute('height', d);
+
+  mesh('wallNorth').setAttribute('width', w);
+  mesh('wallNorth').setAttribute('position', `0 ${parseFloat(mesh('sCeilH').value)/2} ${-d/2}`);
+  mesh('wallSouth').setAttribute('width', w);
+  mesh('wallSouth').setAttribute('position', `0 ${parseFloat(mesh('sCeilH').value)/2} ${d/2}`);
+  mesh('wallEast').setAttribute('height', parseFloat(mesh('sCeilH').value));
+  mesh('wallEast').setAttribute('position', `${w/2} ${parseFloat(mesh('sCeilH').value)/2} 0`);
+  mesh('wallWest').setAttribute('height', parseFloat(mesh('sCeilH').value));
+  mesh('wallWest').setAttribute('position', `${-w/2} ${parseFloat(mesh('sCeilH').value)/2} 0`);
+
+  mesh('vRoomW').textContent = w.toFixed(1);
+  mesh('vRoomD').textContent = d.toFixed(1);
+  mesh('sRoomW').value = w;
+  mesh('sRoomD').value = d;
+}
+
+function setWindowScale(s) {
+  const win = mesh('window');
+  win.setAttribute('width',  1.2 * s);
+  win.setAttribute('height', 1.0 * s);
+  mesh('vWinSc').textContent = s.toFixed(2);
+}
+
+function setPartitionDepth(d) {
+  const part = mesh('partition');
+  if (d < 0.05) {
+    part.setAttribute('visible', false);
+  } else {
+    part.setAttribute('visible', true);
+    part.setAttribute('depth', d);
+  }
+  mesh('vPartD').textContent = d.toFixed(1);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   LIGHTING UPDATES
+══════════════════════════════════════════════════════════════════ */
+function kelvinToRGB(k) {
+  // Approximation — Tanner Helland algorithm
+  k = k / 100;
+  let r, g, b;
+  if (k <= 66) {
+    r = 255;
+    g = k <= 0 ? 0 : Math.max(0, Math.min(255,
+        99.4708025861 * Math.log(k) - 161.1195681661));
+    b = k >= 66 ? 255 : k <= 19 ? 0 :
+        Math.max(0, Math.min(255,
+        138.5177312231 * Math.log(k - 10) - 305.0447927307));
+  } else {
+    r = Math.max(0, Math.min(255,
+        329.698727446 * Math.pow(k - 60, -0.1332047592)));
+    g = Math.max(0, Math.min(255,
+        288.1221695283 * Math.pow(k - 60, -0.0755148492)));
+    b = 255;
+  }
+  const hex = n => ('0'+Math.round(n).toString(16)).slice(-2);
+  return `#${hex(r)}${hex(g)}${hex(b)}`;
+}
+
+function setLighting(intensity, cct, daylight) {
+  const color = kelvinToRGB(cct);
+  const sunI  = mesh('sunLight');
+  const fillI = mesh('fillLight');
+  const ambI  = mesh('ambLight');
+
+  sunI.setAttribute('color', color);
+  sunI.setAttribute('intensity', intensity * 0.6);
+  fillI.setAttribute('color', color);
+  fillI.setAttribute('intensity', intensity * 0.5);
+  ambI.setAttribute('intensity', intensity * 0.3 + daylight/100 * 0.4);
+
+  mesh('vLightI').textContent = intensity.toFixed(2);
+  mesh('vCCT').textContent    = Math.round(cct);
+  mesh('vDaylight').textContent = Math.round(daylight);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   MATERIAL UPDATES
+══════════════════════════════════════════════════════════════════ */
+function getWallElements(wallId) {
+  if (wallId === 'all')
+    return ['wallNorth','wallSouth','wallEast','wallWest'].map(id => mesh(id));
+  return [mesh(`wall${wallId.charAt(0).toUpperCase() + wallId.slice(1)}`)];
+}
+
+function applyWallMat(preset, wallId) {
+  getWallElements(wallId).forEach(el => {
+    if (el) setMat(el, preset.color, preset.roughness, preset.metalness);
+  });
+}
+
+function setWallColor(color, roughness, wallId) {
+  getWallElements(wallId || activeWall).forEach(el => {
+    if (!el) return;
+    const cur = el.getAttribute('material');
+    setMat(el, color, roughness !== undefined ? roughness : cur.roughness, 0);
+  });
+}
+
+function setWallRoughness(r) {
+  getWallElements(activeWall).forEach(el => {
+    if (!el) return;
+    const cur = el.getAttribute('material') || {};
+    setMat(el, cur.color || '#e8e0d5', r, 0);
+  });
+  mesh('vRough').textContent = r.toFixed(2);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   BIOPHILIC UPDATES
+══════════════════════════════════════════════════════════════════ */
+function spawnPlants(count) {
+  const group = mesh('plantGroup');
+  group.innerHTML = '';
+  plantMeshes = [];
+  for (let i = 0; i < count; i++) {
+    const angle  = (i / count) * Math.PI * 2;
+    const radius = 1.5 + Math.random() * 1.5;
+    const x = Math.cos(angle) * radius;
+    const z = Math.sin(angle) * radius;
+
+    const stem = document.createElement('a-cylinder');
+    stem.setAttribute('position', `${x} 0.4 ${z}`);
+    stem.setAttribute('radius', '0.05');
+    stem.setAttribute('height', '0.8');
+    stem.setAttribute('material', 'color:#5d4037');
+
+    const leaf = document.createElement('a-sphere');
+    leaf.setAttribute('position', `${x} 1.0 ${z}`);
+    leaf.setAttribute('radius', '0.3');
+    leaf.setAttribute('material', 'color:#4caf50; roughness:0.9');
+
+    group.appendChild(stem);
+    group.appendChild(leaf);
+    plantMeshes.push(stem, leaf);
+  }
+  mesh('vPlants').textContent = count;
+}
+
+function setNatureView(pct) {
+  const view = mesh('windowView');
+  const green = Math.round((pct / 100) * 0x6f);
+  const blue  = Math.round(0x87 - (pct / 100) * 0x30);
+  view.setAttribute('material',
+    `color:#87ceeb; emissive:#00${green.toString(16).padStart(2,'0')}${blue.toString(16).padStart(2,'0')};
+     emissiveIntensity:${0.1 + pct/100 * 0.5}`);
+  mesh('vNature').textContent = Math.round(pct);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   FURNITURE
+══════════════════════════════════════════════════════════════════ */
+function setFurnitureDensity(pct) {
+  const items = document.querySelectorAll('.furniture');
+  const show  = Math.ceil((pct / 100) * items.length);
+  items.forEach((el, i) => {
+    el.setAttribute('visible', i < show);
+  });
+  mesh('vFurnD').textContent = Math.round(pct);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   ACOUSTIC
+══════════════════════════════════════════════════════════════════ */
+// (Audio loop playback requires CORS-accessible audio files;
+//  this wires up the UI — connect real src URLs for production)
+let currentAudio = null;
+const AUDIO_SRCS = {
+  silence: null,
+  nature:  'https://www.soundjay.com/nature/sounds/forest-ambience-1.mp3',
+  office:  'https://www.soundjay.com/human/sounds/office-ambience-1.mp3',
+  cafe:    'https://www.soundjay.com/human/sounds/cafe-ambience-1.mp3',
+  rain:    'https://www.soundjay.com/nature/sounds/rain-01.mp3',
+};
+function setAudioLoop(loop) {
+  if (currentAudio) { currentAudio.pause(); currentAudio = null; }
+  if (loop !== 'silence' && AUDIO_SRCS[loop]) {
+    currentAudio = new Audio(AUDIO_SRCS[loop]);
+    currentAudio.loop = true;
+    currentAudio.volume = parseFloat(mesh('sAmbient').value) / 80;
+    currentAudio.play().catch(() => {});
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   ATOMIC APPLY — single entry point for ALL modifications
+══════════════════════════════════════════════════════════════════ */
+function applyMods(mods) {
+  // Geometry
+  if (mods.ceiling_height !== undefined) setCeilingHeight(mods.ceiling_height);
+  if (mods.room_width !== undefined || mods.room_depth !== undefined) {
+    const w = mods.room_width  !== undefined ? mods.room_width  : parseFloat(mesh('sRoomW').value);
+    const d = mods.room_depth  !== undefined ? mods.room_depth  : parseFloat(mesh('sRoomD').value);
+    setRoomSize(w, d);
+  }
+  if (mods.window_scale    !== undefined) setWindowScale(mods.window_scale);
+  if (mods.partition_depth !== undefined) setPartitionDepth(mods.partition_depth);
+
+  // Lighting
+  if (mods.light_intensity !== undefined || mods.light_cct !== undefined
+      || mods.daylight_mix !== undefined) {
+    setLighting(
+      mods.light_intensity !== undefined ? mods.light_intensity : parseFloat(mesh('sLightI').value),
+      mods.light_cct       !== undefined ? mods.light_cct       : parseFloat(mesh('sCCT').value),
+      mods.daylight_mix    !== undefined ? mods.daylight_mix    : parseFloat(mesh('sDaylight').value)
+    );
+    if (mods.light_intensity !== undefined) mesh('sLightI').value = mods.light_intensity;
+    if (mods.light_cct       !== undefined) mesh('sCCT').value    = mods.light_cct;
+    if (mods.daylight_mix    !== undefined) mesh('sDaylight').value = mods.daylight_mix;
+  }
+
+  // Wall materials (per-wall or all)
+  ['all','north','south','east','west'].forEach(side => {
+    const ck = `wall_${side}_color`;
+    const rk = `wall_${side}_roughness`;
+    if (mods[ck] !== undefined || mods[rk] !== undefined) {
+      const elList = getWallElements(side);
+      elList.forEach(el => {
+        if (!el) return;
+        const cur = el.getAttribute('material') || {};
+        setMat(el,
+          mods[ck] !== undefined ? mods[ck] : (cur.color || '#e8e0d5'),
+          mods[rk] !== undefined ? mods[rk] : (cur.roughness || 0.7), 0);
+      });
+    }
+  });
+
+  // Floor / Ceiling
+  if (mods.floor_color !== undefined || mods.floor_roughness !== undefined) {
+    const el = mesh('floor');
+    const cur = el.getAttribute('material') || {};
+    setMat(el,
+      mods.floor_color     !== undefined ? mods.floor_color     : cur.color,
+      mods.floor_roughness !== undefined ? mods.floor_roughness : cur.roughness, 0);
+  }
+  if (mods.ceiling_color !== undefined || mods.ceiling_roughness !== undefined) {
+    const el = mesh('ceiling');
+    const cur = el.getAttribute('material') || {};
+    setMat(el,
+      mods.ceiling_color     !== undefined ? mods.ceiling_color     : cur.color,
+      mods.ceiling_roughness !== undefined ? mods.ceiling_roughness : cur.roughness, 0);
+  }
+
+  // Biophilic
+  if (mods.plant_count  !== undefined) {
+    spawnPlants(mods.plant_count);
+    mesh('sPlants').value = mods.plant_count;
+  }
+  if (mods.nature_view  !== undefined) {
+    setNatureView(mods.nature_view);
+    mesh('sNature').value = mods.nature_view;
+  }
+  if (mods.water_feature !== undefined) {
+    mesh('waterFeature').setAttribute('visible', mods.water_feature);
+    mesh('cbWater').checked = mods.water_feature;
+  }
+
+  // Furniture
+  if (mods.furniture_visible !== undefined)
+    document.querySelectorAll('.furniture')
+            .forEach(el => el.setAttribute('visible', mods.furniture_visible));
+  if (mods.furniture_density !== undefined) {
+    setFurnitureDensity(mods.furniture_density);
+    mesh('sFurnD').value = mods.furniture_density;
+  }
+
+  // Acoustic
+  if (mods.ambient_level !== undefined) {
+    mesh('sAmbient').value = mods.ambient_level;
+    mesh('vAmbient').textContent = Math.round(mods.ambient_level);
+    if (currentAudio) currentAudio.volume = mods.ambient_level / 80;
+  }
+  if (mods.audio_loop !== undefined) {
+    setAudioLoop(mods.audio_loop);
+    document.querySelectorAll('.audio-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.loop === mods.audio_loop);
+    });
+  }
+
+  // Visual complexity
+  if (mods.complexity !== undefined) {
+    mesh('sComplexity').value = mods.complexity;
+    mesh('vComplexity').textContent = mods.complexity;
+    // Complexity drives detail overlays (partition + window density)
+  }
+  if (mods.symmetry !== undefined) {
+    mesh('selSymmetry').value = mods.symmetry;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   VALIDATION GATE
+══════════════════════════════════════════════════════════════════ */
+function validateMods(mods) {
+  const v = currentModel.viability || {};
+  const validated = {};
+  const errors    = [];
+  const warnings  = [];
+
+  for (const [key, value] of Object.entries(mods)) {
+    // Geometry check
+    if (key === 'ceiling_height') {
+      if (v.geometry !== '✓') { errors.push(`Ceiling not modifiable on ${currentModel.id}`); continue; }
+      if (value < 2.0 || value > 6.0) { errors.push(`ceiling_height ${value} out of range 2–6`); continue; }
+    }
+    // Per-wall color check
+    if (key.startsWith('wall_') && key.includes('color') && !key.startsWith('wall_all')) {
+      const side = key.split('_')[1];
+      if (v.materials !== '✓') {
+        warnings.push(`Per-wall not supported; applying to all walls`);
+        validated[`wall_all_color`] = value; continue;
+      }
+    }
+    validated[key] = value;
+  }
+  return { validated, errors, warnings };
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   LLM CALL  (Gemini 2.0 Flash)
+══════════════════════════════════════════════════════════════════ */
+async function callGemini(userText) {
+  const sceneSummary = {
+    model: currentModel.id,
+    room:  currentModel.room_dimensions,
+    current: {
+      ceiling_height: parseFloat(mesh('sCeilH').value),
+      light_intensity: parseFloat(mesh('sLightI').value),
+      light_cct: parseFloat(mesh('sCCT').value),
+      plant_count: parseInt(mesh('sPlants').value),
+    },
+    viability: currentModel.viability
+  };
+
+  const body = {
+    systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    contents: [{
+      parts: [{
+        text: `Current scene: ${JSON.stringify(sceneSummary)}\n\nUser instruction: "${userText}"`
+      }]
+    }],
+    generationConfig: { responseMimeType: 'application/json' }
+  };
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/` +
+              `gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+
+  if (!res.ok) throw new Error(`Gemini API error ${res.status}`);
+  const data = await res.json();
+  const raw = data.candidates[0].content.parts[0].text;
+  return JSON.parse(raw);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   NL BUTTON HANDLER
+══════════════════════════════════════════════════════════════════ */
+mesh('nlBtn').addEventListener('click', async () => {
+  const text = mesh('nlInput').value.trim();
+  if (!text) return;
+
+  mesh('valLog').innerHTML = '';
+  log('Sending to Gemini…', 'ok');
+  mesh('nlBtn').disabled = true;
+  mesh('nlBtn').textContent = '…thinking';
+
+  try {
+    let mods;
+    if (!GEMINI_API_KEY || GEMINI_API_KEY === 'YOUR_GEMINI_API_KEY_HERE') {
+      // Demo mode — parse a few keywords without API
+      mods = demoParser(text);
+      log('Demo mode (no API key). Parsed locally.', 'warn');
+    } else {
+      mods = await callGemini(text);
+    }
+
+    log(`LLM returned ${Object.keys(mods).length} field(s)`, 'ok');
+
+    const { validated, errors, warnings } = validateMods(mods);
+
+    warnings.forEach(w => log(w, 'warn'));
+    errors.forEach(e => log(e, 'err'));
+
+    if (Object.keys(validated).length > 0) {
+      applyMods(validated);
+      addHistory(text, validated);
+      log(`Applied ${Object.keys(validated).length} modification(s)`, 'ok');
+    }
+  } catch(e) {
+    log(`Error: ${e.message}`, 'err');
+  } finally {
+    mesh('nlBtn').disabled = false;
+    mesh('nlBtn').textContent = '▶ Apply with AI';
+  }
+});
+
+/* ══════════════════════════════════════════════════════════════════
+   DEMO PARSER (no API key fallback)
+══════════════════════════════════════════════════════════════════ */
+function demoParser(text) {
+  const mods = {};
+  const t = text.toLowerCase();
+  if (t.includes('high ceiling') || t.includes('soaring'))  mods.ceiling_height = 5.0;
+  if (t.includes('low ceiling')  || t.includes('cozy'))     mods.ceiling_height = 2.4;
+  if (t.includes('warm'))   { mods.light_cct = 2700; mods.light_intensity = 0.7; }
+  if (t.includes('clinical') || t.includes('bright')) { mods.light_cct = 6500; mods.light_intensity = 2.0; }
+  if (t.includes('brick'))  mods.wall_north_color = '#8b4513';
+  if (t.includes('wood'))   { mods.wall_all_color = '#c8a97e'; mods.wall_all_roughness = 0.7; }
+  if (t.includes('white'))  mods.wall_all_color = '#ffffff';
+  if (t.includes('plant'))  mods.plant_count = 6;
+  if (t.includes('no furniture') || t.includes('remove furniture')) mods.furniture_visible = false;
+  if (t.includes('dark'))   mods.light_intensity = 0.3;
+  if (t.includes('large window') || t.includes('panoramic')) mods.window_scale = 2.5;
+  if (t.includes('small window')) mods.window_scale = 0.3;
+  return mods;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   SLIDER EVENTS
+══════════════════════════════════════════════════════════════════ */
+mesh('sCeilH').addEventListener('input', e => setCeilingHeight(+e.target.value));
+mesh('sRoomW').addEventListener('input', e =>
+  setRoomSize(+e.target.value, parseFloat(mesh('sRoomD').value)));
+mesh('sRoomD').addEventListener('input', e =>
+  setRoomSize(parseFloat(mesh('sRoomW').value), +e.target.value));
+mesh('sPartD').addEventListener('input', e => {
+  setPartitionDepth(+e.target.value);
+  mesh('vPartD').textContent = (+e.target.value).toFixed(1);
+});
+mesh('sWinSc').addEventListener('input', e => setWindowScale(+e.target.value));
+mesh('sLightI').addEventListener('input', e =>
+  setLighting(+e.target.value, parseFloat(mesh('sCCT').value), parseFloat(mesh('sDaylight').value)));
+mesh('sCCT').addEventListener('input', e =>
+  setLighting(parseFloat(mesh('sLightI').value), +e.target.value, parseFloat(mesh('sDaylight').value)));
+mesh('sDaylight').addEventListener('input', e =>
+  setLighting(parseFloat(mesh('sLightI').value), parseFloat(mesh('sCCT').value), +e.target.value));
+mesh('sRough').addEventListener('input', e => setWallRoughness(+e.target.value));
+mesh('sPlants').addEventListener('input', e => spawnPlants(+e.target.value));
+mesh('sNature').addEventListener('input', e => setNatureView(+e.target.value));
+mesh('cbWater').addEventListener('change', e => {
+  mesh('waterFeature').setAttribute('visible', e.target.checked);
+});
+mesh('sFurnD').addEventListener('input', e => setFurnitureDensity(+e.target.value));
+mesh('sAmbient').addEventListener('input', e => {
+  mesh('vAmbient').textContent = Math.round(+e.target.value);
+  if (currentAudio) currentAudio.volume = +e.target.value / 80;
+});
+mesh('sComplexity').addEventListener('input', e => {
+  mesh('vComplexity').textContent = (+e.target.value).toFixed(1);
+});
+
+/* ══════════════════════════════════════════════════════════════════
+   WALL SELECTOR
+══════════════════════════════════════════════════════════════════ */
+document.querySelectorAll('.wall-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.wall-btn')
+            .forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    activeWall = btn.dataset.wall;
+  });
+});
+
+/* ══════════════════════════════════════════════════════════════════
+   AUDIO SELECTOR
+══════════════════════════════════════════════════════════════════ */
+document.querySelectorAll('.audio-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.audio-btn')
+            .forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    setAudioLoop(btn.dataset.loop);
+  });
+});
+
+/* ══════════════════════════════════════════════════════════════════
+   BUILD MATERIAL SWATCHES
+══════════════════════════════════════════════════════════════════ */
+function buildSwatches(mats, containerId, applyFn) {
+  const container = mesh(containerId);
+  mats.forEach((m, i) => {
+    const s = document.createElement('div');
+    s.className = 'swatch' + (i === 0 ? ' active' : '');
+    s.style.background = m.color;
+    s.title = m.name;
+    s.textContent = m.name.slice(0,3);
+    s.addEventListener('click', () => {
+      container.querySelectorAll('.swatch')
+               .forEach(x => x.classList.remove('active'));
+      s.classList.add('active');
+      applyFn(m);
+    });
+    container.appendChild(s);
+  });
+}
+
+buildSwatches(WALL_MATS,  'wallMats',  m => {
+  applyWallMat(m, activeWall);
+  mesh('sRough').value = m.roughness;
+  mesh('vRough').textContent = m.roughness.toFixed(2);
+});
+buildSwatches(FLOOR_MATS, 'floorMats', m => setMat(mesh('floor'),   m.color, m.roughness, m.metalness));
+buildSwatches(CEIL_MATS,  'ceilMats',  m => setMat(mesh('ceiling'), m.color, m.roughness, m.metalness));
+
+/* ══════════════════════════════════════════════════════════════════
+   PRESET BUTTONS
+══════════════════════════════════════════════════════════════════ */
+document.querySelectorAll('.preset-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const preset = PRESETS[btn.dataset.preset];
+    if (!preset) return;
+    mesh('valLog').innerHTML = '';
+    log(`Applying preset: ${preset.label}`, 'ok');
+    log(`Citation: ${preset.note}`, 'ok');
+    const { validated, errors, warnings } = validateMods(preset.mods);
+    warnings.forEach(w => log(w, 'warn'));
+    errors.forEach(e => log(e, 'err'));
+    applyMods(validated);
+    addHistory(`[PRESET] ${preset.label}`, validated);
+  });
+});
+
+/* ══════════════════════════════════════════════════════════════════
+   MODEL SELECTOR
+══════════════════════════════════════════════════════════════════ */
+const sel = mesh('modelSelect');
+CATALOG.forEach(m => {
+  const opt = document.createElement('option');
+  opt.value = m.id;
+  opt.textContent = m.label;
+  sel.appendChild(opt);
+});
+sel.value = CATALOG[0].id;
+
+sel.addEventListener('change', () => {
+  const found = CATALOG.find(m => m.id === sel.value);
+  if (!found) return;
+  currentModel = found;
+  mesh('valLog').innerHTML = '';
+  log(`Loaded model: ${found.label}`, 'ok');
+
+  const glb = mesh('gltfModel');
+  if (found.glb) {
+    glb.setAttribute('gltf-model', `url(${found.glb})`);
+    glb.setAttribute('visible', true);
+    // Hide primitive shell when using real GLB
+    mesh('room').querySelectorAll('a-plane, a-box, a-cylinder, a-sphere')
+                .forEach(el => {
+                  if (!el.closest('#gltfModel'))
+                    el.setAttribute('visible', false);
+                });
+  } else {
+    glb.setAttribute('visible', false);
+    mesh('room').querySelectorAll('a-plane, a-box, a-cylinder, a-sphere')
+                .forEach(el => {
+                  if (!el.closest('#gltfModel'))
+                    el.setAttribute('visible', true);
+                });
+  }
+
+  if (found.meshRoles) {
+    fetch(found.meshRoles).then(r => r.json()).then(j => {
+      meshRoles = j;
+      log(`mesh_roles loaded: ${Object.keys(j.meshes).length} meshes`, 'ok');
+    }).catch(() => log('mesh_roles.json not found', 'warn'));
+  }
+});
+
+/* ══════════════════════════════════════════════════════════════════
+   RESET
+══════════════════════════════════════════════════════════════════ */
+mesh('resetBtn').addEventListener('click', () => {
+  applyMods({
+    ceiling_height:  defaultState.ceilH,
+    room_width:      defaultState.roomW,
+    room_depth:      defaultState.roomD,
+    partition_depth: defaultState.partD,
+    window_scale:    defaultState.winSc,
+    light_intensity: defaultState.lightI,
+    light_cct:       defaultState.cct,
+    daylight_mix:    defaultState.daylight,
+    wall_all_color:  '#e8e0d5',
+    wall_all_roughness: defaultState.rough,
+    floor_color:     '#c8a97e',
+    ceiling_color:   '#f0ece4',
+    plant_count:     defaultState.plants,
+    nature_view:     defaultState.nature,
+    water_feature:   false,
+    furniture_visible: true,
+    furniture_density: defaultState.furnD,
+    ambient_level:   defaultState.ambient,
+    complexity:      defaultState.complexity,
+  });
+  mesh('valLog').innerHTML = '';
+  log('Scene reset to defaults', 'ok');
+});
+
+/* ══════════════════════════════════════════════════════════════════
+   EXPORT modified glTF
+══════════════════════════════════════════════════════════════════ */
+mesh('exportBtn').addEventListener('click', () => {
+  // Build a state snapshot JSON as a proxy for the export
+  const state = {
+    model_id:   currentModel.id,
+    timestamp:  new Date().toISOString(),
+    ceiling_height: parseFloat(mesh('sCeilH').value),
+    room_width:     parseFloat(mesh('sRoomW').value),
+    room_depth:     parseFloat(mesh('sRoomD').value),
+    light_intensity: parseFloat(mesh('sLightI').value),
+    light_cct:       parseFloat(mesh('sCCT').value),
+    plant_count:     parseInt(mesh('sPlants').value),
+    modification_history: modHistory
+  };
+  const blob = new Blob([JSON.stringify(state, null, 2)],
+                        { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `ka_scene_export_${Date.now()}.json`;
+  a.click();
+  log('Scene state exported as JSON', 'ok');
+});
+
+/* ══════════════════════════════════════════════════════════════════
+   FPS COUNTER
+══════════════════════════════════════════════════════════════════ */
+let lastTime = performance.now();
+let frameCount = 0;
+function fpsLoop() {
+  frameCount++;
+  const now = performance.now();
+  if (now - lastTime >= 1000) {
+    mesh('fps').textContent = `FPS: ${frameCount}`;
+    frameCount = 0; lastTime = now;
+  }
+  requestAnimationFrame(fpsLoop);
+}
+fpsLoop();
+
+/* ══════════════════════════════════════════════════════════════════
+   INIT
+══════════════════════════════════════════════════════════════════ */
+window.addEventListener('load', () => {
+  saveDefaults();
+  spawnPlants(3);
+  log('Viewer ready. Select a model or type a natural-language instruction.', 'ok');
+});
+</script>
+</body>
+</html>
